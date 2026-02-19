@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from trading_agent.fetcher import fetch_ohlcv
-from trading_agent.strategy import compute_rsi, rsi_signal
+from trading_agent.strategy import compute_rsi, rsi_signal, SignalFilter, DEFAULT_BUY_COOLDOWN
 
 
 @dataclass
@@ -44,6 +44,7 @@ def run_backtest(
     limit: int = 500,
     initial_cash: float = 10_000.0,
     buy_fraction: float = 0.1,
+    buy_cooldown: int = DEFAULT_BUY_COOLDOWN,
 ) -> BacktestResult:
     df = fetch_ohlcv(symbol, timeframe, limit)
     df = compute_rsi(df)
@@ -53,11 +54,13 @@ def run_backtest(
     entry_price = 0.0
     trades: list[dict] = []
     equity_curve: list[float] = []
+    sig_filter = SignalFilter(buy_cooldown=buy_cooldown)
 
     for i, row in df.iterrows():
         price = row["close"]
         rsi = row["rsi"]
-        signal = rsi_signal(rsi)
+        raw = rsi_signal(rsi)
+        signal = sig_filter.filter(raw)
 
         # Track equity
         equity = cash + position * price

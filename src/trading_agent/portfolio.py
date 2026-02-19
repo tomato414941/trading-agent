@@ -18,6 +18,7 @@ class Portfolio:
     cash: float = 10_000.0
     position: float = 0.0  # BTC quantity
     entry_price: float = 0.0
+    ticks_since_buy: int = 999  # allow first buy immediately
 
     def buy(self, price: float, fraction: float = 0.1) -> dict | None:
         amount_usd = self.cash * fraction

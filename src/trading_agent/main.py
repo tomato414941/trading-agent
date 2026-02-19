@@ -3,7 +3,7 @@
 import time
 import logging
 from trading_agent.fetcher import fetch_ohlcv
-from trading_agent.strategy import compute_rsi, generate_signal
+from trading_agent.strategy import compute_rsi, generate_signal, SignalFilter, DEFAULT_BUY_COOLDOWN
 from trading_agent.portfolio import Portfolio, log_trade
 
 logging.basicConfig(
@@ -28,12 +28,20 @@ def tick() -> None:
     latest = df.iloc[-1]
     price = latest["close"]
     rsi = latest["rsi"]
-    signal = generate_signal(df)
+    raw_signal = generate_signal(df)
+
+    # Apply cooldown filter (restore state from portfolio)
+    sig_filter = SignalFilter(buy_cooldown=DEFAULT_BUY_COOLDOWN)
+    sig_filter._ticks_since_buy = portfolio.ticks_since_buy
+    signal = sig_filter.filter(raw_signal)
+    portfolio.ticks_since_buy = sig_filter._ticks_since_buy
 
     total = portfolio.cash + portfolio.position * price
     log.info(
-        "Price: $%.2f | RSI: %.1f | Signal: %s | Cash: $%.2f | BTC: %.6f | Total: $%.2f",
-        price, rsi, signal.upper(), portfolio.cash, portfolio.position, total,
+        "Price: $%.2f | RSI: %.1f | Raw: %s | Signal: %s | Cooldown: %d/%d | Cash: $%.2f | BTC: %.6f | Total: $%.2f",
+        price, rsi, raw_signal.upper(), signal.upper(),
+        sig_filter._ticks_since_buy, DEFAULT_BUY_COOLDOWN,
+        portfolio.cash, portfolio.position, total,
     )
 
     trade = None

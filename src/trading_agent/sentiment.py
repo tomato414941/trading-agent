@@ -1,4 +1,4 @@
-"""LLM-based sentiment analysis using Claude API."""
+"""LLM-based sentiment analysis using OpenAI API."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import logging
 import os
 
-from anthropic import Anthropic
+from openai import OpenAI
 
 from trading_agent.news import fetch_headlines
 
@@ -29,19 +29,18 @@ Where:
 """
 
 
-def _get_client() -> Anthropic:
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
+def _get_client() -> OpenAI:
+    key = os.environ.get("OPENAI_API_KEY", "")
     if not key:
-        secrets = os.path.expanduser("~/.secrets/anthropic")
+        secrets = os.path.expanduser("~/.secrets/openai")
         if os.path.exists(secrets):
             with open(secrets) as f:
                 for line in f:
-                    if "ANTHROPIC_API_KEY" in line:
-                        # handle: export ANTHROPIC_API_KEY=...
+                    if "OPENAI_API_KEY" in line:
                         val = line.strip().split("=", 1)[-1].strip().strip("'\"")
                         key = val
                         break
-    return Anthropic(api_key=key)
+    return OpenAI(api_key=key)
 
 
 def analyze_sentiment(max_headlines: int = 8) -> dict:
@@ -63,15 +62,15 @@ def analyze_sentiment(max_headlines: int = 8) -> dict:
 
     try:
         client = _get_client()
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
             max_tokens=150,
             messages=[{
                 "role": "user",
                 "content": SENTIMENT_PROMPT.format(headlines=headline_text),
             }],
         )
-        raw = resp.content[0].text.strip()
+        raw = resp.choices[0].message.content.strip()
     except Exception as e:
         log.warning("LLM API call failed: %s", e)
         return {"score": 0.0, "summary": f"API error: {e}", "headline_count": len(headlines)}

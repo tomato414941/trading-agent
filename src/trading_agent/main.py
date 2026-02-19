@@ -2,8 +2,6 @@
 
 import time
 import logging
-from datetime import datetime
-
 from trading_agent.fetcher import fetch_ohlcv
 from trading_agent.strategy import compute_rsi, generate_signal
 from trading_agent.portfolio import Portfolio, log_trade

@@ -12,6 +12,7 @@ from trading_agent.strategy import (
     compute_indicators,
     rsi_signal,
     composite_signal,
+    sentiment_weighted_signal,
     SignalFilter,
     DEFAULT_BUY_COOLDOWN,
 )
@@ -58,9 +59,23 @@ def signal_rsi_macd(row: pd.Series, prev_row: pd.Series | None) -> str:
     return composite_signal(row["rsi"], row["macd_diff"], prev_row["macd_diff"])
 
 
+def _make_sentiment_fn(score: float) -> Callable:
+    """Create a sentiment signal function with a fixed score (for backtesting)."""
+    def fn(row: pd.Series, prev_row: pd.Series | None) -> str:
+        if prev_row is None:
+            return "hold"
+        return sentiment_weighted_signal(
+            row["rsi"], row["macd_diff"], prev_row["macd_diff"], score,
+        )
+    return fn
+
+
 STRATEGIES: dict[str, Callable] = {
     "rsi": signal_rsi_only,
     "rsi+macd": signal_rsi_macd,
+    "bullish(+0.5)": _make_sentiment_fn(0.5),
+    "bearish(-0.5)": _make_sentiment_fn(-0.5),
+    "neutral(0.0)": _make_sentiment_fn(0.0),
 }
 
 

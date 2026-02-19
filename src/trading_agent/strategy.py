@@ -58,6 +58,42 @@ def composite_signal(rsi: float, macd_diff: float, prev_macd_diff: float) -> str
     return "hold"
 
 
+def sentiment_weighted_signal(
+    rsi: float,
+    macd_diff: float,
+    prev_macd_diff: float,
+    sentiment_score: float,
+) -> str:
+    """RSI + MACD + sentiment: LLM sentiment acts as a gate/boost.
+
+    - sentiment_score > 0.3:  bullish news relaxes RSI buy threshold (< 40)
+    - sentiment_score < -0.3: bearish news relaxes RSI sell threshold (> 60)
+    - Otherwise: same as composite_signal (RSI < 30 + MACD rising)
+
+    Sentiment NEVER overrides technicals alone — it only widens the trigger zone.
+    """
+    if pd.isna(rsi) or pd.isna(macd_diff) or pd.isna(prev_macd_diff):
+        return "hold"
+
+    macd_rising = macd_diff > prev_macd_diff
+    macd_falling = macd_diff < prev_macd_diff
+
+    # Adjust thresholds based on sentiment
+    buy_threshold = RSI_OVERSOLD
+    sell_threshold = RSI_OVERBOUGHT
+
+    if sentiment_score > 0.3:
+        buy_threshold = 40  # bullish news: buy on mild dips too
+    elif sentiment_score < -0.3:
+        sell_threshold = 60  # bearish news: sell earlier
+
+    if rsi < buy_threshold and macd_rising:
+        return "buy"
+    if rsi > sell_threshold and macd_falling:
+        return "sell"
+    return "hold"
+
+
 class SignalFilter:
     """Wraps raw signals with cooldown logic."""
 

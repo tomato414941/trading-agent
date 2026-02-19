@@ -1,9 +1,16 @@
-"""Main loop — fetch data, compute RSI, generate signal, execute virtual trade."""
+"""Main loop — fetch data, analyze sentiment, generate signal, execute virtual trade."""
 
 import time
 import logging
+
 from trading_agent.fetcher import fetch_ohlcv
-from trading_agent.strategy import compute_rsi, generate_signal, SignalFilter, DEFAULT_BUY_COOLDOWN
+from trading_agent.strategy import (
+    compute_indicators,
+    sentiment_weighted_signal,
+    SignalFilter,
+    DEFAULT_BUY_COOLDOWN,
+)
+from trading_agent.sentiment import analyze_sentiment
 from trading_agent.portfolio import Portfolio, log_trade
 
 logging.basicConfig(
@@ -23,14 +30,28 @@ def tick() -> None:
 
     log.info("Fetching %s %s candles...", SYMBOL, TIMEFRAME)
     df = fetch_ohlcv(SYMBOL, TIMEFRAME)
-    df = compute_rsi(df)
+    df = compute_indicators(df)
 
     latest = df.iloc[-1]
+    prev = df.iloc[-2]
     price = latest["close"]
     rsi = latest["rsi"]
-    raw_signal = generate_signal(df)
 
-    # Apply cooldown filter (restore state from portfolio)
+    # Sentiment analysis (falls back to 0.0 on failure)
+    log.info("Analyzing news sentiment...")
+    sent = analyze_sentiment()
+    sentiment_score = sent["score"]
+    log.info("Sentiment: %+.2f (%s)", sentiment_score, sent["summary"][:80])
+
+    # Generate raw signal with all three indicators
+    raw_signal = sentiment_weighted_signal(
+        rsi=rsi,
+        macd_diff=latest["macd_diff"],
+        prev_macd_diff=prev["macd_diff"],
+        sentiment_score=sentiment_score,
+    )
+
+    # Apply cooldown filter
     sig_filter = SignalFilter(buy_cooldown=DEFAULT_BUY_COOLDOWN)
     sig_filter._ticks_since_buy = portfolio.ticks_since_buy
     signal = sig_filter.filter(raw_signal)
@@ -38,10 +59,9 @@ def tick() -> None:
 
     total = portfolio.cash + portfolio.position * price
     log.info(
-        "Price: $%.2f | RSI: %.1f | Raw: %s | Signal: %s | Cooldown: %d/%d | Cash: $%.2f | BTC: %.6f | Total: $%.2f",
-        price, rsi, raw_signal.upper(), signal.upper(),
-        sig_filter._ticks_since_buy, DEFAULT_BUY_COOLDOWN,
-        portfolio.cash, portfolio.position, total,
+        "Price: $%.2f | RSI: %.1f | Sentiment: %+.2f | Raw: %s | Signal: %s | Cash: $%.2f | Total: $%.2f",
+        price, rsi, sentiment_score, raw_signal.upper(), signal.upper(),
+        portfolio.cash, total,
     )
 
     trade = None
@@ -60,7 +80,7 @@ def tick() -> None:
 
 
 def run(once: bool = False) -> None:
-    log.info("=== Trading Agent started (%s, %s) ===", SYMBOL, TIMEFRAME)
+    log.info("=== Trading Agent started (%s, %s, RSI+MACD+Sentiment) ===", SYMBOL, TIMEFRAME)
     while True:
         try:
             tick()

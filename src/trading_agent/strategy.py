@@ -1,11 +1,12 @@
-"""RSI-based signal generation with cooldown."""
+"""Signal generation with RSI, MACD, and cooldown."""
 
 from __future__ import annotations
 
 import pandas as pd
 from ta.momentum import RSIIndicator
+from ta.trend import MACD
 
-# Thresholds
+# RSI thresholds
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 
@@ -13,11 +14,19 @@ RSI_OVERBOUGHT = 70
 DEFAULT_BUY_COOLDOWN = 12
 
 
-def compute_rsi(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
-    rsi = RSIIndicator(close=df["close"], window=window)
+def compute_indicators(df: pd.DataFrame, rsi_window: int = 14) -> pd.DataFrame:
     df = df.copy()
-    df["rsi"] = rsi.rsi()
+    df["rsi"] = RSIIndicator(close=df["close"], window=rsi_window).rsi()
+    macd = MACD(close=df["close"])
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+    df["macd_diff"] = macd.macd_diff()  # histogram: macd - signal
     return df
+
+
+# Keep for backward compat (main.py, tests)
+def compute_rsi(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
+    return compute_indicators(df, rsi_window=window)
 
 
 def rsi_signal(rsi: float) -> str:
@@ -26,6 +35,25 @@ def rsi_signal(rsi: float) -> str:
     if rsi < RSI_OVERSOLD:
         return "buy"
     if rsi > RSI_OVERBOUGHT:
+        return "sell"
+    return "hold"
+
+
+def composite_signal(rsi: float, macd_diff: float, prev_macd_diff: float) -> str:
+    """RSI + MACD composite: require both indicators to agree.
+
+    Buy:  RSI oversold AND MACD histogram rising (momentum recovering)
+    Sell: RSI overbought AND MACD histogram falling (momentum fading)
+    """
+    if pd.isna(rsi) or pd.isna(macd_diff) or pd.isna(prev_macd_diff):
+        return "hold"
+
+    macd_rising = macd_diff > prev_macd_diff
+    macd_falling = macd_diff < prev_macd_diff
+
+    if rsi < RSI_OVERSOLD and macd_rising:
+        return "buy"
+    if rsi > RSI_OVERBOUGHT and macd_falling:
         return "sell"
     return "hold"
 

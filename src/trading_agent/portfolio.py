@@ -42,8 +42,10 @@ class Portfolio:
         qty = amount_usd / price
         self.cash -= amount_usd
         pos = self._pos(symbol)
+        # Weighted average cost basis
+        total_cost = pos.qty * pos.entry_price + qty * price
         pos.qty += qty
-        pos.entry_price = price
+        pos.entry_price = total_cost / pos.qty if pos.qty > 0 else price
         self._save_pos(symbol, pos)
         return {"side": "buy", "symbol": symbol, "price": price, "qty": qty, "cost": amount_usd}
 

@@ -101,6 +101,14 @@ class SignalFilter:
         self.buy_cooldown = buy_cooldown
         self._ticks_since_buy = buy_cooldown  # allow first buy immediately
 
+    @property
+    def ticks_since_buy(self) -> int:
+        return self._ticks_since_buy
+
+    @ticks_since_buy.setter
+    def ticks_since_buy(self, value: int) -> None:
+        self._ticks_since_buy = value
+
     def filter(self, raw_signal: str) -> str:
         self._ticks_since_buy += 1
 

@@ -47,9 +47,9 @@ def tick_symbol(symbol: str, portfolio: Portfolio, sentiment_score: float) -> No
 
     # Apply cooldown filter (per-symbol state)
     sig_filter = SignalFilter(buy_cooldown=DEFAULT_BUY_COOLDOWN)
-    sig_filter._ticks_since_buy = pos.ticks_since_buy
+    sig_filter.ticks_since_buy = pos.ticks_since_buy
     signal = sig_filter.filter(raw_signal)
-    pos.ticks_since_buy = sig_filter._ticks_since_buy
+    pos.ticks_since_buy = sig_filter.ticks_since_buy
     portfolio._save_pos(symbol, pos)
 
     log.info(

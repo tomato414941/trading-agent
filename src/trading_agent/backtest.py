@@ -17,6 +17,9 @@ from trading_agent.strategy import (
     DEFAULT_BUY_COOLDOWN,
 )
 
+# Binance taker fee
+DEFAULT_FEE_RATE = 0.001
+
 
 @dataclass
 class BacktestResult:
@@ -29,20 +32,23 @@ class BacktestResult:
     win_rate: float
     max_drawdown_pct: float
     sharpe_ratio: float
+    period_start: str = ""
+    period_end: str = ""
     trades: list[dict] = field(default_factory=list)
 
     def summary(self) -> str:
+        low_sample = " (low sample)" if self.num_trades < 3 else ""
         lines = [
             f"=== {self.strategy_name} ===",
-            f"Period:          {self.trades[0]['timestamp']} → {self.trades[-1]['timestamp']}" if self.trades else "No trades",
+            f"Period:          {self.period_start} → {self.period_end}",
             f"Initial:         ${self.initial_cash:,.2f}",
             f"Final:           ${self.final_value:,.2f}",
             f"Return:          {self.total_return_pct:+.2f}%",
             f"Buy & Hold:      {self.buy_and_hold_pct:+.2f}%",
-            f"Trades:          {self.num_trades}",
-            f"Win Rate:        {self.win_rate:.1f}%",
+            f"Trades:          {self.num_trades}{low_sample}",
+            f"Win Rate:        {self.win_rate:.1f}%{low_sample}",
             f"Max Drawdown:    {self.max_drawdown_pct:.2f}%",
-            f"Sharpe Ratio:    {self.sharpe_ratio:.2f}",
+            f"Sharpe Ratio:    {self.sharpe_ratio:.2f}{low_sample}",
         ]
         return "\n".join(lines)
 
@@ -86,64 +92,93 @@ def run_backtest(
     initial_cash: float = 10_000.0,
     buy_fraction: float = 0.1,
     buy_cooldown: int = DEFAULT_BUY_COOLDOWN,
+    fee_rate: float = DEFAULT_FEE_RATE,
     strategy: str = "rsi",
     df: pd.DataFrame | None = None,
 ) -> BacktestResult:
     if df is None:
         df = fetch_ohlcv(symbol, timeframe, limit)
     df = compute_indicators(df)
+    df = df.reset_index(drop=True)
 
     signal_fn = STRATEGIES[strategy]
 
     cash = initial_cash
     position = 0.0
-    entry_price = 0.0
+    avg_entry = 0.0
     trades: list[dict] = []
     equity_curve: list[float] = []
     sig_filter = SignalFilter(buy_cooldown=buy_cooldown)
     prev_row = None
+    pending_signal: str | None = None
 
     for i, row in df.iterrows():
         price = row["close"]
+
+        # Execute pending signal from previous candle at this candle's open
+        if pending_signal is not None and i > 0:
+            exec_price = row["open"]
+
+            if pending_signal == "buy" and cash > 1.0:
+                cost_before_fee = cash * buy_fraction
+                fee = cost_before_fee * fee_rate
+                cost_total = cost_before_fee + fee
+                if cost_total > cash:
+                    cost_before_fee = cash / (1 + fee_rate)
+                    fee = cost_before_fee * fee_rate
+                    cost_total = cost_before_fee + fee
+                qty = cost_before_fee / exec_price
+                # Weighted average cost basis
+                total_cost = position * avg_entry + qty * exec_price
+                position += qty
+                avg_entry = total_cost / position if position > 0 else exec_price
+                cash -= cost_total
+                trades.append({
+                    "timestamp": row["timestamp"],
+                    "side": "buy",
+                    "price": exec_price,
+                    "qty": qty,
+                    "fee": fee,
+                    "pnl": None,
+                })
+
+            elif pending_signal == "sell" and position > 0:
+                revenue_before_fee = position * exec_price
+                fee = revenue_before_fee * fee_rate
+                revenue = revenue_before_fee - fee
+                pnl = revenue - (position * avg_entry)
+                trades.append({
+                    "timestamp": row["timestamp"],
+                    "side": "sell",
+                    "price": exec_price,
+                    "qty": position,
+                    "fee": fee,
+                    "pnl": pnl,
+                })
+                cash += revenue
+                position = 0.0
+                avg_entry = 0.0
+
+        pending_signal = None
+
+        # Compute signal on this candle (will execute on next candle's open)
+        equity = cash + position * price
+        equity_curve.append(equity)
+
         raw = signal_fn(row, prev_row)
         signal = sig_filter.filter(raw)
         prev_row = row
 
-        equity = cash + position * price
-        equity_curve.append(equity)
-
-        if signal == "buy" and cash > 1.0:
-            cost = cash * buy_fraction
-            qty = cost / price
-            cash -= cost
-            position += qty
-            entry_price = price
-            trades.append({
-                "timestamp": row["timestamp"],
-                "side": "buy",
-                "price": price,
-                "qty": qty,
-                "pnl": None,
-            })
-
-        elif signal == "sell" and position > 0:
-            revenue = position * price
-            pnl = revenue - position * entry_price
-            trades.append({
-                "timestamp": row["timestamp"],
-                "side": "sell",
-                "price": price,
-                "qty": position,
-                "pnl": pnl,
-            })
-            cash += revenue
-            position = 0.0
-            entry_price = 0.0
+        if signal in ("buy", "sell"):
+            pending_signal = signal
 
     # Final valuation
     final_price = df.iloc[-1]["close"]
     final_value = cash + position * final_price
     first_price = df.iloc[0]["close"]
+
+    period_start = str(df.iloc[0]["timestamp"])
+    period_end = str(df.iloc[-1]["timestamp"])
 
     # Metrics
     total_return_pct = (final_value / initial_cash - 1) * 100
@@ -178,17 +213,19 @@ def run_backtest(
         win_rate=win_rate,
         max_drawdown_pct=max_drawdown_pct,
         sharpe_ratio=sharpe_ratio,
+        period_start=period_start,
+        period_end=period_end,
         trades=trades,
     )
 
 
 def compare(results: list[BacktestResult]) -> str:
-    header = f"{'Strategy':<12} {'Return':>8} {'B&H':>8} {'Trades':>7} {'Win%':>6} {'MaxDD':>7} {'Sharpe':>7}"
+    header = f"{'Strategy':<14} {'Return':>8} {'B&H':>8} {'Trades':>7} {'Win%':>6} {'MaxDD':>7} {'Sharpe':>7}"
     sep = "-" * len(header)
     lines = [header, sep]
     for r in results:
         lines.append(
-            f"{r.strategy_name:<12} {r.total_return_pct:>+7.2f}% {r.buy_and_hold_pct:>+7.2f}% {r.num_trades:>7} {r.win_rate:>5.1f}% {r.max_drawdown_pct:>6.2f}% {r.sharpe_ratio:>7.2f}"
+            f"{r.strategy_name:<14} {r.total_return_pct:>+7.2f}% {r.buy_and_hold_pct:>+7.2f}% {r.num_trades:>7} {r.win_rate:>5.1f}% {r.max_drawdown_pct:>6.2f}% {r.sharpe_ratio:>7.2f}"
         )
     return "\n".join(lines)
 

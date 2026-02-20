@@ -7,7 +7,10 @@ from typing import Callable
 
 import pandas as pd
 
-from trading_agent.fetcher import fetch_ohlcv
+from itertools import product
+from pathlib import Path
+
+from trading_agent.fetcher import fetch_ohlcv, fetch_ohlcv_paginated
 from trading_agent.strategy import (
     compute_indicators,
     rsi_signal,
@@ -287,53 +290,147 @@ SENTIMENT_SCENARIOS: dict[str, float] = {
 }
 
 
+def parameter_sweep(
+    symbol: str = "BTC/USDT",
+    timeframe: str = "1h",
+    limit: int = 1000,
+    strategy: str = "rsi+macd",
+    rsi_windows: list[int] | None = None,
+    cooldowns: list[int] | None = None,
+    stop_losses: list[float] | None = None,
+    take_profits: list[float] | None = None,
+    df: pd.DataFrame | None = None,
+) -> list[BacktestResult]:
+    if rsi_windows is None:
+        rsi_windows = [10, 14, 20]
+    if cooldowns is None:
+        cooldowns = [6, 12, 24]
+    if stop_losses is None:
+        stop_losses = [0, 3, 5, 8]
+    if take_profits is None:
+        take_profits = [0, 10, 15, 20]
+
+    if df is None:
+        df = fetch_ohlcv(symbol, timeframe, limit)
+
+    results: list[BacktestResult] = []
+    combos = list(product(rsi_windows, cooldowns, stop_losses, take_profits))
+    total = len(combos)
+
+    for idx, (rsi_w, cd, sl, tp) in enumerate(combos, 1):
+        df_ind = compute_indicators(df.copy(), rsi_window=rsi_w)
+        r = run_backtest(
+            symbol=symbol,
+            timeframe=timeframe,
+            buy_cooldown=cd,
+            stop_loss_pct=sl,
+            take_profit_pct=tp,
+            strategy=strategy,
+            df=df_ind,
+        )
+        r.strategy_name = f"rsi{rsi_w}_cd{cd}_sl{sl}_tp{tp}"
+        results.append(r)
+
+        if idx % 20 == 0 or idx == total:
+            print(f"  sweep: {idx}/{total} done")
+
+    results.sort(key=lambda r: r.total_return_pct, reverse=True)
+    return results
+
+
+def save_sweep_results(results: list[BacktestResult], path: str | Path) -> None:
+    path = Path(path)
+    rows = []
+    for r in results:
+        rows.append({
+            "strategy": r.strategy_name,
+            "return_pct": round(r.total_return_pct, 4),
+            "buy_hold_pct": round(r.buy_and_hold_pct, 4),
+            "trades": r.num_trades,
+            "win_rate": round(r.win_rate, 2),
+            "max_dd_pct": round(r.max_drawdown_pct, 4),
+            "sharpe": round(r.sharpe_ratio, 4),
+            "sl_count": r.stop_loss_count,
+            "tp_count": r.take_profit_count,
+            "period_start": r.period_start,
+            "period_end": r.period_end,
+        })
+    pd.DataFrame(rows).to_csv(path, index=False)
+    print(f"Saved {len(rows)} results to {path}")
+
+
 if __name__ == "__main__":
     import sys
 
     DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-    timeframe = sys.argv[1] if len(sys.argv) > 1 else "1h"
-    limit = int(sys.argv[2]) if len(sys.argv) > 2 else 500
-    symbols = sys.argv[3:] if len(sys.argv) > 3 else DEFAULT_SYMBOLS
 
-    for symbol in symbols:
-        df = fetch_ohlcv(symbol, timeframe, limit)
-        print(f"\n{'='*60}")
-        print(f"  {symbol}  ({timeframe}, {limit} candles)")
-        print(f"{'='*60}\n")
+    if "--sweep" in sys.argv:
+        # python -m trading_agent.backtest --sweep BTC/USDT --limit 1000
+        args = [a for a in sys.argv[1:] if a != "--sweep"]
+        symbol = args[0] if args else "BTC/USDT"
+        limit = 1000
+        timeframe = "1h"
+        for i, a in enumerate(args):
+            if a == "--limit" and i + 1 < len(args):
+                limit = int(args[i + 1])
+            if a == "--tf" and i + 1 < len(args):
+                timeframe = args[i + 1]
 
-        results = []
-        # Technical-only strategies
-        for strat in STRATEGIES:
-            result = run_backtest(symbol, timeframe, limit, strategy=strat, df=df)
-            results.append(result)
-            print(result.summary())
+        print(f"Fetching {limit} candles for {symbol} ({timeframe})...")
+        if limit > 1000:
+            df = fetch_ohlcv_paginated(symbol, timeframe, total=limit)
+        else:
+            df = fetch_ohlcv(symbol, timeframe, limit)
+        print(f"Got {len(df)} candles: {df.iloc[0]['timestamp']} → {df.iloc[-1]['timestamp']}")
+
+        results = parameter_sweep(symbol, timeframe, limit, df=df)
+        print("\nTop 10 results:")
+        print(compare(results[:10]))
+
+        csv_path = f"sweep_{symbol.replace('/', '_')}_{timeframe}_{limit}.csv"
+        save_sweep_results(results, csv_path)
+    else:
+        timeframe = sys.argv[1] if len(sys.argv) > 1 else "1h"
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 else 500
+        symbols = sys.argv[3:] if len(sys.argv) > 3 else DEFAULT_SYMBOLS
+
+        for symbol in symbols:
+            df = fetch_ohlcv(symbol, timeframe, limit)
+            print(f"\n{'='*60}")
+            print(f"  {symbol}  ({timeframe}, {limit} candles)")
+            print(f"{'='*60}\n")
+
+            results = []
+            for strat in STRATEGIES:
+                result = run_backtest(symbol, timeframe, limit, strategy=strat, df=df)
+                results.append(result)
+                print(result.summary())
+                print()
+
+            for name, score in SENTIMENT_SCENARIOS.items():
+                result = run_backtest(
+                    symbol, timeframe, limit,
+                    strategy="rsi+macd", sentiment_score=score, df=df,
+                )
+                result = BacktestResult(
+                    strategy_name=name,
+                    initial_cash=result.initial_cash,
+                    final_value=result.final_value,
+                    total_return_pct=result.total_return_pct,
+                    buy_and_hold_pct=result.buy_and_hold_pct,
+                    num_trades=result.num_trades,
+                    win_rate=result.win_rate,
+                    max_drawdown_pct=result.max_drawdown_pct,
+                    sharpe_ratio=result.sharpe_ratio,
+                    stop_loss_count=result.stop_loss_count,
+                    take_profit_count=result.take_profit_count,
+                    period_start=result.period_start,
+                    period_end=result.period_end,
+                    trades=result.trades,
+                )
+                results.append(result)
+                print(result.summary())
+                print()
+
+            print(compare(results))
             print()
-
-        # Sentiment scenarios (rsi+macd base + sentiment sizing)
-        for name, score in SENTIMENT_SCENARIOS.items():
-            result = run_backtest(
-                symbol, timeframe, limit,
-                strategy="rsi+macd", sentiment_score=score, df=df,
-            )
-            result = BacktestResult(
-                strategy_name=name,
-                initial_cash=result.initial_cash,
-                final_value=result.final_value,
-                total_return_pct=result.total_return_pct,
-                buy_and_hold_pct=result.buy_and_hold_pct,
-                num_trades=result.num_trades,
-                win_rate=result.win_rate,
-                max_drawdown_pct=result.max_drawdown_pct,
-                sharpe_ratio=result.sharpe_ratio,
-                stop_loss_count=result.stop_loss_count,
-                take_profit_count=result.take_profit_count,
-                period_start=result.period_start,
-                period_end=result.period_end,
-                trades=result.trades,
-            )
-            results.append(result)
-            print(result.summary())
-            print()
-
-        print(compare(results))
-        print()

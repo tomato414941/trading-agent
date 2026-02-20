@@ -14,6 +14,7 @@ from trading_agent.strategy import (
 )
 from trading_agent.sentiment import analyze_sentiment
 from trading_agent.portfolio import Portfolio, log_trade
+from trading_agent.notify import notify_trade, notify_agent_status
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +57,7 @@ def tick_symbol(
                 symbol, sl_action.upper().replace("_", " "), price, pnl_pct,
             )
             log_trade(trade, sl_action, rsi)
+            notify_trade(trade, sl_action, rsi)
         return
 
     # Generate raw signal (technicals only)
@@ -93,6 +95,7 @@ def tick_symbol(
             symbol, trade["side"].upper(), trade["qty"], price,
         )
         log_trade(trade, signal, rsi)
+        notify_trade(trade, signal, rsi)
 
 
 def tick() -> None:
@@ -131,15 +134,19 @@ def tick() -> None:
 
 def run(once: bool = False) -> None:
     log.info("=== Trading Agent started (%s, %s) ===", ", ".join(SYMBOLS), TIMEFRAME)
-    while True:
-        try:
-            tick()
-        except Exception:
-            log.exception("Error during tick")
-        if once:
-            break
-        log.info("Next tick in %d seconds...", INTERVAL_SEC)
-        time.sleep(INTERVAL_SEC)
+    notify_agent_status("started", f"Symbols: {', '.join(SYMBOLS)} | TF: {TIMEFRAME}")
+    try:
+        while True:
+            try:
+                tick()
+            except Exception:
+                log.exception("Error during tick")
+            if once:
+                break
+            log.info("Next tick in %d seconds...", INTERVAL_SEC)
+            time.sleep(INTERVAL_SEC)
+    finally:
+        notify_agent_status("stopped")
 
 
 if __name__ == "__main__":

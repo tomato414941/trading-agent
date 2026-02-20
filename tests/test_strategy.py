@@ -3,6 +3,7 @@ from trading_agent.strategy import (
     rsi_signal,
     composite_signal,
     sentiment_weighted_signal,
+    sentiment_multiplier,
     SignalFilter,
 )
 
@@ -46,6 +47,24 @@ class TestSentimentWeightedSignal:
     ])
     def test_sentiment_thresholds(self, rsi, macd_diff, prev, score, expected):
         assert sentiment_weighted_signal(rsi, macd_diff, prev, score) == expected
+
+
+class TestSentimentMultiplier:
+    @pytest.mark.parametrize("score,expected", [
+        (0.0, 1.0),       # neutral → 1x
+        (1.0, 1.25),      # max bullish → 1.25x
+        (-1.0, 0.75),     # max bearish → 0.75x
+        (0.5, 1.125),     # moderate bullish
+        (-0.5, 0.875),    # moderate bearish
+        (2.0, 1.25),      # clamped to +1
+        (-3.0, 0.75),     # clamped to -1
+    ])
+    def test_multiplier_values(self, score, expected):
+        assert sentiment_multiplier(score) == pytest.approx(expected)
+
+    def test_custom_scale(self):
+        assert sentiment_multiplier(1.0, scale=0.5) == pytest.approx(1.5)
+        assert sentiment_multiplier(-1.0, scale=0.5) == pytest.approx(0.5)
 
 
 class TestSignalFilter:

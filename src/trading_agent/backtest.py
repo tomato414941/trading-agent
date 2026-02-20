@@ -12,7 +12,7 @@ from trading_agent.strategy import (
     compute_indicators,
     rsi_signal,
     composite_signal,
-    sentiment_weighted_signal,
+    sentiment_multiplier,
     SignalFilter,
     DEFAULT_BUY_COOLDOWN,
 )
@@ -70,23 +70,9 @@ def signal_rsi_macd(row: pd.Series, prev_row: pd.Series | None) -> str:
     return composite_signal(row["rsi"], row["macd_diff"], prev_row["macd_diff"])
 
 
-def _make_sentiment_fn(score: float) -> Callable:
-    """Create a sentiment signal function with a fixed score (for backtesting)."""
-    def fn(row: pd.Series, prev_row: pd.Series | None) -> str:
-        if prev_row is None:
-            return "hold"
-        return sentiment_weighted_signal(
-            row["rsi"], row["macd_diff"], prev_row["macd_diff"], score,
-        )
-    return fn
-
-
 STRATEGIES: dict[str, Callable] = {
     "rsi": signal_rsi_only,
     "rsi+macd": signal_rsi_macd,
-    "bullish(+0.5)": _make_sentiment_fn(0.5),
-    "bearish(-0.5)": _make_sentiment_fn(-0.5),
-    "neutral(0.0)": _make_sentiment_fn(0.0),
 }
 
 
@@ -102,6 +88,7 @@ def run_backtest(
     take_profit_pct: float = 0.0,
     max_exposure_pct: float = 100.0,
     strategy: str = "rsi",
+    sentiment_score: float = 0.0,
     df: pd.DataFrame | None = None,
 ) -> BacktestResult:
     if df is None:
@@ -110,6 +97,10 @@ def run_backtest(
     df = df.reset_index(drop=True)
 
     signal_fn = STRATEGIES[strategy]
+
+    # Sentiment adjusts buy size, not direction
+    sent_mult = sentiment_multiplier(sentiment_score)
+    effective_buy_fraction = buy_fraction * sent_mult
 
     cash = initial_cash
     position = 0.0
@@ -177,7 +168,7 @@ def run_backtest(
                     if exposure >= max_exposure_pct:
                         pending_signal = None
             if pending_signal == "buy" and cash > 1.0:
-                cost_before_fee = cash * buy_fraction
+                cost_before_fee = cash * effective_buy_fraction
                 fee = cost_before_fee * fee_rate
                 cost_total = cost_before_fee + fee
                 if cost_total > cash:
@@ -289,6 +280,13 @@ def compare(results: list[BacktestResult]) -> str:
     return "\n".join(lines)
 
 
+SENTIMENT_SCENARIOS: dict[str, float] = {
+    "sent+0.5": 0.5,
+    "sent-0.5": -0.5,
+    "sent=0.0": 0.0,
+}
+
+
 if __name__ == "__main__":
     import sys
 
@@ -304,12 +302,37 @@ if __name__ == "__main__":
         print(f"{'='*60}\n")
 
         results = []
+        # Technical-only strategies
         for strat in STRATEGIES:
             result = run_backtest(symbol, timeframe, limit, strategy=strat, df=df)
             results.append(result)
             print(result.summary())
-            if result.trades:
-                print(f"  Trades: {len(result.trades)} entries")
+            print()
+
+        # Sentiment scenarios (rsi+macd base + sentiment sizing)
+        for name, score in SENTIMENT_SCENARIOS.items():
+            result = run_backtest(
+                symbol, timeframe, limit,
+                strategy="rsi+macd", sentiment_score=score, df=df,
+            )
+            result = BacktestResult(
+                strategy_name=name,
+                initial_cash=result.initial_cash,
+                final_value=result.final_value,
+                total_return_pct=result.total_return_pct,
+                buy_and_hold_pct=result.buy_and_hold_pct,
+                num_trades=result.num_trades,
+                win_rate=result.win_rate,
+                max_drawdown_pct=result.max_drawdown_pct,
+                sharpe_ratio=result.sharpe_ratio,
+                stop_loss_count=result.stop_loss_count,
+                take_profit_count=result.take_profit_count,
+                period_start=result.period_start,
+                period_end=result.period_end,
+                trades=result.trades,
+            )
+            results.append(result)
+            print(result.summary())
             print()
 
         print(compare(results))

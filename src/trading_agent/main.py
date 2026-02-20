@@ -7,7 +7,8 @@ from trading_agent.config import DEFAULT_RISK
 from trading_agent.fetcher import fetch_ohlcv
 from trading_agent.strategy import (
     compute_indicators,
-    sentiment_weighted_signal,
+    composite_signal,
+    sentiment_multiplier,
     SignalFilter,
     DEFAULT_BUY_COOLDOWN,
 )
@@ -57,13 +58,12 @@ def tick_symbol(
             log_trade(trade, sl_action, rsi)
         return
 
-    # Generate raw signal
-    raw_signal = sentiment_weighted_signal(
-        rsi=rsi,
-        macd_diff=latest["macd_diff"],
-        prev_macd_diff=prev["macd_diff"],
-        sentiment_score=sentiment_score,
-    )
+    # Generate raw signal (technicals only)
+    raw_signal = composite_signal(rsi, latest["macd_diff"], prev["macd_diff"])
+
+    # Sentiment adjusts position size, not direction
+    multiplier = sentiment_multiplier(sentiment_score)
+    adjusted_fraction = DEFAULT_RISK.buy_fraction * multiplier
 
     # Apply cooldown filter (per-symbol state)
     sig_filter = SignalFilter(buy_cooldown=DEFAULT_BUY_COOLDOWN)
@@ -73,15 +73,15 @@ def tick_symbol(
     portfolio._save_pos(symbol, pos)
 
     log.info(
-        "[%s] $%.2f | RSI: %.1f | Sent: %+.2f | Raw: %s | Signal: %s | Pos: %.6f",
-        symbol, price, rsi, sentiment_score,
+        "[%s] $%.2f | RSI: %.1f | Sent: %+.2f (x%.2f) | Raw: %s | Signal: %s | Pos: %.6f",
+        symbol, price, rsi, sentiment_score, multiplier,
         raw_signal.upper(), signal.upper(), pos.qty,
     )
 
     trade = None
     if signal == "buy":
         if portfolio.can_buy(prices, DEFAULT_RISK):
-            trade = portfolio.buy(symbol, price, fraction=DEFAULT_RISK.buy_fraction)
+            trade = portfolio.buy(symbol, price, fraction=adjusted_fraction)
         else:
             log.info("[%s] Max exposure reached, skipping buy", symbol)
     elif signal == "sell":

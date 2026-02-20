@@ -94,6 +94,16 @@ def sentiment_weighted_signal(
     return "hold"
 
 
+def sentiment_multiplier(score: float, scale: float = 0.25) -> float:
+    """Smooth position size multiplier based on sentiment score.
+
+    score [-1, +1] -> multiplier [1-scale, 1+scale]
+    Default scale=0.25: bullish(+1) -> 1.25x, bearish(-1) -> 0.75x
+    """
+    clamped = max(-1.0, min(1.0, score))
+    return 1.0 + clamped * scale
+
+
 class SignalFilter:
     """Wraps raw signals with cooldown logic."""
 

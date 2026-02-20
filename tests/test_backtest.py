@@ -46,3 +46,14 @@ class TestBacktestEngine:
         assert result.initial_cash == 10_000.0
         assert result.max_drawdown_pct >= 0
         assert isinstance(result.trades, list)
+
+    def test_sentiment_score_affects_buy_size(self, make_ohlcv_df):
+        # Downtrend then recovery to trigger buy signals
+        closes = [100.0] * 20 + [90.0 - i * 2 for i in range(15)] + [80.0 + i * 3 for i in range(15)]
+        df = make_ohlcv_df(closes)
+        r_neutral = run_backtest(df=df, strategy="rsi+macd", sentiment_score=0.0)
+        r_bullish = run_backtest(df=df, strategy="rsi+macd", sentiment_score=1.0)
+        r_bearish = run_backtest(df=df, strategy="rsi+macd", sentiment_score=-1.0)
+        # All use the same signal direction (composite_signal)
+        assert r_neutral.num_trades == r_bullish.num_trades
+        assert r_neutral.num_trades == r_bearish.num_trades

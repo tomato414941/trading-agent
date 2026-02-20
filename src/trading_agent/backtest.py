@@ -196,23 +196,25 @@ def compare(results: list[BacktestResult]) -> str:
 if __name__ == "__main__":
     import sys
 
-    symbol = sys.argv[1] if len(sys.argv) > 1 else "BTC/USDT"
-    timeframe = sys.argv[2] if len(sys.argv) > 2 else "1h"
-    limit = int(sys.argv[3]) if len(sys.argv) > 3 else 500
+    DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    timeframe = sys.argv[1] if len(sys.argv) > 1 else "1h"
+    limit = int(sys.argv[2]) if len(sys.argv) > 2 else 500
+    symbols = sys.argv[3:] if len(sys.argv) > 3 else DEFAULT_SYMBOLS
 
-    # Fetch data once, run both strategies on the same data
-    df = fetch_ohlcv(symbol, timeframe, limit)
+    for symbol in symbols:
+        df = fetch_ohlcv(symbol, timeframe, limit)
+        print(f"\n{'='*60}")
+        print(f"  {symbol}  ({timeframe}, {limit} candles)")
+        print(f"{'='*60}\n")
 
-    print(f"Backtest: {symbol} {timeframe} ({limit} candles)\n")
+        results = []
+        for strat in STRATEGIES:
+            result = run_backtest(symbol, timeframe, limit, strategy=strat, df=df)
+            results.append(result)
+            print(result.summary())
+            if result.trades:
+                print(f"  Trades: {len(result.trades)} entries")
+            print()
 
-    results = []
-    for strat in STRATEGIES:
-        result = run_backtest(symbol, timeframe, limit, strategy=strat, df=df)
-        results.append(result)
-        print(result.summary())
-        if result.trades:
-            print(f"  Trades: {len(result.trades)} entries")
+        print(compare(results))
         print()
-
-    print("=== Comparison ===")
-    print(compare(results))

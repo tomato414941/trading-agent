@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 SENTIMENT_PROMPT = """\
 You are a crypto market sentiment analyst.
-Given the following news headlines about Bitcoin/crypto, rate the overall market sentiment.
+Given the following news headlines about a cryptocurrency, rate the overall market sentiment.
 
 Headlines:
 {headlines}
@@ -43,7 +43,7 @@ def _get_client() -> OpenAI:
     return OpenAI(api_key=key)
 
 
-def analyze_sentiment(max_headlines: int = 8) -> dict:
+def analyze_sentiment(max_headlines: int = 8, symbol: str = "BTC/USDT") -> dict:
     """Fetch news and return sentiment score + summary.
 
     Returns:
@@ -51,7 +51,7 @@ def analyze_sentiment(max_headlines: int = 8) -> dict:
         score is clamped to [-1.0, 1.0]
         Returns score=0.0 on any failure (safe fallback).
     """
-    headlines = fetch_headlines(max_headlines)
+    headlines = fetch_headlines(max_headlines, symbol=symbol)
     if not headlines:
         log.warning("No headlines fetched, returning neutral sentiment")
         return {"score": 0.0, "summary": "No news available", "headline_count": 0}

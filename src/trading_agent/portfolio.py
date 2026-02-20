@@ -1,10 +1,10 @@
-"""Virtual portfolio tracker — no real money involved."""
+"""Virtual portfolio tracker — no real money involved. Supports multiple symbols."""
 
 from __future__ import annotations
 
 import csv
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -14,42 +14,65 @@ TRADE_LOG = DATA_DIR / "trades.csv"
 
 
 @dataclass
+class Position:
+    qty: float = 0.0
+    entry_price: float = 0.0
+    ticks_since_buy: int = 999
+
+
+@dataclass
 class Portfolio:
     cash: float = 10_000.0
-    position: float = 0.0  # BTC quantity
-    entry_price: float = 0.0
-    ticks_since_buy: int = 999  # allow first buy immediately
+    positions: dict[str, dict] = field(default_factory=dict)
 
-    def buy(self, price: float, fraction: float = 0.1) -> dict | None:
+    def _pos(self, symbol: str) -> Position:
+        raw = self.positions.get(symbol, {})
+        return Position(**raw) if raw else Position()
+
+    def _save_pos(self, symbol: str, pos: Position) -> None:
+        self.positions[symbol] = asdict(pos)
+
+    def get_position(self, symbol: str) -> Position:
+        return self._pos(symbol)
+
+    def buy(self, symbol: str, price: float, fraction: float = 0.1) -> dict | None:
         amount_usd = self.cash * fraction
         if amount_usd < 1.0:
             return None
         qty = amount_usd / price
         self.cash -= amount_usd
-        self.position += qty
-        self.entry_price = price
-        return {"side": "buy", "price": price, "qty": qty, "cost": amount_usd}
+        pos = self._pos(symbol)
+        pos.qty += qty
+        pos.entry_price = price
+        self._save_pos(symbol, pos)
+        return {"side": "buy", "symbol": symbol, "price": price, "qty": qty, "cost": amount_usd}
 
-    def sell(self, price: float) -> dict | None:
-        if self.position <= 0:
+    def sell(self, symbol: str, price: float) -> dict | None:
+        pos = self._pos(symbol)
+        if pos.qty <= 0:
             return None
-        revenue = self.position * price
-        pnl = revenue - (self.position * self.entry_price)
+        revenue = pos.qty * price
+        pnl = revenue - (pos.qty * pos.entry_price)
         trade = {
             "side": "sell",
+            "symbol": symbol,
             "price": price,
-            "qty": self.position,
+            "qty": pos.qty,
             "revenue": revenue,
             "pnl": pnl,
         }
         self.cash += revenue
-        self.position = 0.0
-        self.entry_price = 0.0
+        pos.qty = 0.0
+        pos.entry_price = 0.0
+        self._save_pos(symbol, pos)
         return trade
 
-    @property
-    def total_value(self) -> float:
-        return self.cash  # position value added at runtime with current price
+    def total_value(self, prices: dict[str, float]) -> float:
+        value = self.cash
+        for symbol, raw in self.positions.items():
+            pos = Position(**raw) if raw else Position()
+            value += pos.qty * prices.get(symbol, 0)
+        return value
 
     def save(self) -> None:
         DATA_DIR.mkdir(exist_ok=True)
@@ -66,7 +89,7 @@ class Portfolio:
 def log_trade(trade: dict, signal: str, rsi: float) -> None:
     DATA_DIR.mkdir(exist_ok=True)
     file_exists = TRADE_LOG.exists()
-    fieldnames = ["timestamp", "signal", "rsi", "side", "price", "qty", "pnl"]
+    fieldnames = ["timestamp", "symbol", "signal", "rsi", "side", "price", "qty", "pnl"]
 
     with open(TRADE_LOG, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -74,6 +97,7 @@ def log_trade(trade: dict, signal: str, rsi: float) -> None:
             writer.writeheader()
         writer.writerow({
             "timestamp": datetime.now().isoformat(),
+            "symbol": trade.get("symbol", ""),
             "signal": signal,
             "rsi": round(rsi, 2),
             "side": trade.get("side", ""),

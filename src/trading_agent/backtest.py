@@ -32,6 +32,8 @@ class BacktestResult:
     win_rate: float
     max_drawdown_pct: float
     sharpe_ratio: float
+    stop_loss_count: int = 0
+    take_profit_count: int = 0
     period_start: str = ""
     period_end: str = ""
     trades: list[dict] = field(default_factory=list)
@@ -50,6 +52,9 @@ class BacktestResult:
             f"Max Drawdown:    {self.max_drawdown_pct:.2f}%",
             f"Sharpe Ratio:    {self.sharpe_ratio:.2f}{low_sample}",
         ]
+        if self.stop_loss_count or self.take_profit_count:
+            lines.append(f"Stop Loss:       {self.stop_loss_count}")
+            lines.append(f"Take Profit:     {self.take_profit_count}")
         return "\n".join(lines)
 
 
@@ -93,6 +98,9 @@ def run_backtest(
     buy_fraction: float = 0.1,
     buy_cooldown: int = DEFAULT_BUY_COOLDOWN,
     fee_rate: float = DEFAULT_FEE_RATE,
+    stop_loss_pct: float = 0.0,
+    take_profit_pct: float = 0.0,
+    max_exposure_pct: float = 100.0,
     strategy: str = "rsi",
     df: pd.DataFrame | None = None,
 ) -> BacktestResult:
@@ -111,14 +119,63 @@ def run_backtest(
     sig_filter = SignalFilter(buy_cooldown=buy_cooldown)
     prev_row = None
     pending_signal: str | None = None
+    sl_count = 0
+    tp_count = 0
 
     for i, row in df.iterrows():
         price = row["close"]
+
+        # Stop-loss / take-profit check
+        if position > 0 and avg_entry > 0:
+            pnl_pct = (price - avg_entry) / avg_entry * 100
+            if stop_loss_pct > 0 and pnl_pct <= -stop_loss_pct:
+                fee = position * price * fee_rate
+                revenue = position * price - fee
+                pnl = revenue - (position * avg_entry)
+                trades.append({
+                    "timestamp": row["timestamp"],
+                    "side": "sell",
+                    "price": price,
+                    "qty": position,
+                    "fee": fee,
+                    "pnl": pnl,
+                    "reason": "stop_loss",
+                })
+                cash += revenue
+                position = 0.0
+                avg_entry = 0.0
+                sl_count += 1
+                pending_signal = None
+            elif take_profit_pct > 0 and pnl_pct >= take_profit_pct:
+                fee = position * price * fee_rate
+                revenue = position * price - fee
+                pnl = revenue - (position * avg_entry)
+                trades.append({
+                    "timestamp": row["timestamp"],
+                    "side": "sell",
+                    "price": price,
+                    "qty": position,
+                    "fee": fee,
+                    "pnl": pnl,
+                    "reason": "take_profit",
+                })
+                cash += revenue
+                position = 0.0
+                avg_entry = 0.0
+                tp_count += 1
+                pending_signal = None
 
         # Execute pending signal from previous candle at this candle's open
         if pending_signal is not None and i > 0:
             exec_price = row["open"]
 
+            if pending_signal == "buy" and cash > 1.0:
+                # Max exposure check
+                equity = cash + position * exec_price
+                if equity > 0 and max_exposure_pct < 100:
+                    exposure = (position * exec_price / equity) * 100
+                    if exposure >= max_exposure_pct:
+                        pending_signal = None
             if pending_signal == "buy" and cash > 1.0:
                 cost_before_fee = cash * buy_fraction
                 fee = cost_before_fee * fee_rate
@@ -213,6 +270,8 @@ def run_backtest(
         win_rate=win_rate,
         max_drawdown_pct=max_drawdown_pct,
         sharpe_ratio=sharpe_ratio,
+        stop_loss_count=sl_count,
+        take_profit_count=tp_count,
         period_start=period_start,
         period_end=period_end,
         trades=trades,

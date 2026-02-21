@@ -83,3 +83,65 @@ def fetch_ticker_price(symbol: str = "BTC/USDT") -> float:
     exchange = ccxt.binance()
     ticker = exchange.fetch_ticker(symbol)
     return float(ticker["last"])
+
+
+# Funding rate interval: 8 hours
+_FR_INTERVAL_MS = 8 * 3_600_000
+_FR_PAGE_SIZE = 500
+
+# Spot → futures symbol mapping
+_FUTURES_SYMBOL = {
+    "BTC/USDT": "BTC/USDT:USDT",
+    "ETH/USDT": "ETH/USDT:USDT",
+    "SOL/USDT": "SOL/USDT:USDT",
+}
+
+
+def _to_futures_symbol(symbol: str) -> str:
+    return _FUTURES_SYMBOL.get(symbol, f"{symbol}:USDT")
+
+
+def fetch_funding_rate(symbol: str = "BTC/USDT") -> dict:
+    """Fetch current funding rate for a symbol."""
+    exchange = ccxt.binance()
+    return exchange.fetch_funding_rate(_to_futures_symbol(symbol))
+
+
+def fetch_funding_rate_history(
+    symbol: str = "BTC/USDT",
+    total: int = 1000,
+) -> pd.DataFrame:
+    """Fetch funding rate history with pagination (8h intervals)."""
+    exchange = ccxt.binance()
+    futures_sym = _to_futures_symbol(symbol)
+
+    all_data: list[dict] = []
+    end_ms = int(time.time() * 1000)
+    remaining = total
+
+    while remaining > 0:
+        batch_size = min(remaining, _FR_PAGE_SIZE)
+        since_ms = end_ms - batch_size * _FR_INTERVAL_MS
+
+        raw = exchange.fetch_funding_rate_history(
+            futures_sym, since=since_ms, limit=batch_size,
+        )
+        if not raw:
+            break
+
+        all_data = raw + all_data
+        end_ms = raw[0]["timestamp"] - 1
+        remaining -= len(raw)
+
+        if len(raw) < batch_size:
+            break
+        time.sleep(0.2)
+
+    if not all_data:
+        return pd.DataFrame(columns=["timestamp", "funding_rate"])
+
+    df = pd.DataFrame(all_data)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df = df.rename(columns={"fundingRate": "funding_rate"})
+    df = df[["timestamp", "funding_rate"]].drop_duplicates("timestamp").sort_values("timestamp")
+    return df.reset_index(drop=True)

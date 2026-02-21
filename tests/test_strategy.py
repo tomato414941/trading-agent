@@ -7,6 +7,8 @@ from trading_agent.strategy import (
     sentiment_multiplier,
     bb_volume_signal,
     bb_rsi_signal,
+    funding_rate_signal,
+    bb_volume_funding_signal,
     SignalFilter,
 )
 
@@ -156,3 +158,47 @@ class TestBBRsiSignal:
     def test_hold_no_volume(self):
         row = self._make_row(close=95, bb_lower=96, bb_upper=104, rsi=35, vol_ratio=1.0)
         assert bb_rsi_signal(row, None) == "hold"
+
+
+class TestFundingRateSignal:
+    def test_high_positive_fr_sell(self):
+        assert funding_rate_signal(0.001) == "sell"
+
+    def test_high_negative_fr_buy(self):
+        assert funding_rate_signal(-0.001) == "buy"
+
+    def test_neutral_fr_hold(self):
+        assert funding_rate_signal(0.0001) == "hold"
+
+    def test_nan_hold(self):
+        assert funding_rate_signal(float("nan")) == "hold"
+
+    def test_custom_threshold(self):
+        assert funding_rate_signal(0.0003, threshold=0.0002) == "sell"
+        assert funding_rate_signal(0.0003, threshold=0.0005) == "hold"
+
+
+class TestBBVolumeFundingSignal:
+    def _make_row(self, close, bb_lower, bb_upper, vol_ratio):
+        return pd.Series({
+            "close": close,
+            "bb_lower": bb_lower,
+            "bb_upper": bb_upper,
+            "vol_ratio": vol_ratio,
+        })
+
+    def test_bb_and_fr_agree_buy(self):
+        row = self._make_row(close=95, bb_lower=96, bb_upper=104, vol_ratio=2.0)
+        assert bb_volume_funding_signal(row, None, funding_rate=-0.001) == "buy"
+
+    def test_bb_signal_alone(self):
+        row = self._make_row(close=95, bb_lower=96, bb_upper=104, vol_ratio=2.0)
+        assert bb_volume_funding_signal(row, None, funding_rate=0.0) == "buy"
+
+    def test_fr_signal_alone(self):
+        row = self._make_row(close=100, bb_lower=96, bb_upper=104, vol_ratio=1.0)
+        assert bb_volume_funding_signal(row, None, funding_rate=-0.001) == "buy"
+
+    def test_no_signal(self):
+        row = self._make_row(close=100, bb_lower=96, bb_upper=104, vol_ratio=1.0)
+        assert bb_volume_funding_signal(row, None, funding_rate=0.0) == "hold"

@@ -18,6 +18,8 @@ from trading_agent.strategy import (
     composite_signal,
     bb_volume_signal,
     bb_rsi_signal,
+    bb_volume_funding_signal,
+    funding_rate_signal,
     sentiment_multiplier,
     SignalFilter,
     DEFAULT_BUY_COOLDOWN,
@@ -141,11 +143,23 @@ def signal_bb_rsi(row: pd.Series, prev_row: pd.Series | None) -> str:
     return bb_rsi_signal(row, prev_row)
 
 
+def signal_funding(row: pd.Series, prev_row: pd.Series | None) -> str:
+    fr = row.get("funding_rate", 0.0)
+    return funding_rate_signal(fr)
+
+
+def signal_bb_vol_funding(row: pd.Series, prev_row: pd.Series | None) -> str:
+    fr = row.get("funding_rate", 0.0)
+    return bb_volume_funding_signal(row, prev_row, funding_rate=fr)
+
+
 STRATEGIES: dict[str, Callable] = {
     "rsi": signal_rsi_only,
     "rsi+macd": signal_rsi_macd,
     "bb+vol": signal_bb_volume,
     "bb+rsi+vol": signal_bb_rsi,
+    "funding": signal_funding,
+    "bb+vol+fr": signal_bb_vol_funding,
 }
 
 
@@ -218,6 +232,22 @@ def _precompute_regime_column(
     return regimes
 
 
+def _merge_funding_rates(df: pd.DataFrame, fr_df: pd.DataFrame) -> pd.DataFrame:
+    """Merge funding rate data into OHLCV dataframe by nearest timestamp.
+
+    Funding rates are 8-hourly; forward-fill to align with 1h candles.
+    """
+    if fr_df is None or fr_df.empty:
+        df["funding_rate"] = 0.0
+        return df
+    fr = fr_df[["timestamp", "funding_rate"]].copy()
+    fr = fr.sort_values("timestamp")
+    df = df.sort_values("timestamp")
+    df = pd.merge_asof(df, fr, on="timestamp", direction="backward")
+    df["funding_rate"] = df["funding_rate"].fillna(0.0)
+    return df
+
+
 def run_backtest(
     symbol: str = "BTC/USDT",
     timeframe: str = "1h",
@@ -235,10 +265,15 @@ def run_backtest(
     regime_filter: bool = False,
     regime_timeframe: str = "4h",
     df: pd.DataFrame | None = None,
+    funding_df: pd.DataFrame | None = None,
 ) -> BacktestResult:
     if df is None:
         df = fetch_ohlcv(symbol, timeframe, limit)
     df = compute_indicators(df)
+    if funding_df is not None:
+        df = _merge_funding_rates(df, funding_df)
+    elif "funding_rate" not in df.columns:
+        df["funding_rate"] = 0.0
     df = df.reset_index(drop=True)
 
     signal_fn = STRATEGIES[strategy]

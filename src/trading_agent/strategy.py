@@ -203,5 +203,47 @@ def bb_rsi_signal(
     return "hold"
 
 
+def funding_rate_signal(funding_rate: float, threshold: float = 0.0005) -> str:
+    """Funding rate mean-reversion signal.
+
+    High positive FR (>threshold): longs pay shorts → market overheated → sell
+    High negative FR (<-threshold): shorts pay longs → market oversold → buy
+    Otherwise: hold
+    """
+    if pd.isna(funding_rate):
+        return "hold"
+    if funding_rate > threshold:
+        return "sell"
+    if funding_rate < -threshold:
+        return "buy"
+    return "hold"
+
+
+def bb_volume_funding_signal(
+    row: pd.Series,
+    prev_row: pd.Series | None,
+    funding_rate: float = 0.0,
+) -> str:
+    """BB + Volume + Funding rate composite.
+
+    Buy:  (price <= lower BB AND volume spike) OR extreme negative FR
+    Sell: (price >= upper BB AND volume spike) OR extreme positive FR
+    Funding rate acts as an independent confirmer/overrider.
+    """
+    bb_sig = bb_volume_signal(row, prev_row)
+    fr_sig = funding_rate_signal(funding_rate)
+
+    # If both agree, strong signal
+    if bb_sig == fr_sig and bb_sig != "hold":
+        return bb_sig
+    # If BB gives signal, follow it
+    if bb_sig != "hold":
+        return bb_sig
+    # If FR gives signal on its own (extreme rates), follow it
+    if fr_sig != "hold":
+        return fr_sig
+    return "hold"
+
+
 def generate_signal(df: pd.DataFrame) -> str:
     return rsi_signal(df.iloc[-1]["rsi"])

@@ -266,19 +266,20 @@ def run_arbitrage_backtest(
                 low_fr_count = 0
 
             if low_fr_count >= config.exit_consecutive_periods:
-                # Close: sell spot + cover futures short
-                spot_revenue = position.spot_qty * price
+                # Close delta-neutral: spot sell + futures cover
+                # In delta-neutral, spot price change is offset by futures short
+                notional = position.spot_qty * price
                 exit_fees = (
-                    spot_revenue * config.spot_fee_rate
-                    + spot_revenue * config.futures_fee_rate
+                    notional * config.spot_fee_rate
+                    + notional * config.futures_fee_rate
                 )
-                cash += spot_revenue - exit_fees
+                # Return invested capital (price change cancels out)
+                invested = position.spot_qty * position.spot_entry_price
+                cash += invested - exit_fees
                 total_fees += exit_fees
 
                 pnl = (
-                    spot_revenue
-                    - position.spot_qty * position.spot_entry_price
-                    + position.accumulated_fr
+                    position.accumulated_fr
                     - position.entry_fees
                     - exit_fees
                 )
@@ -316,10 +317,10 @@ def run_arbitrage_backtest(
             cash -= invest
             total_fees += entry_fees
 
-        # Track equity
+        # Track equity (delta-neutral: position value = invested capital)
         equity = cash
         if position is not None:
-            equity += position.spot_qty * price
+            equity += position.spot_qty * position.spot_entry_price
         equity_curve.append(equity)
 
         # Max drawdown
@@ -333,18 +334,18 @@ def run_arbitrage_backtest(
     if position is not None and len(data) > 0:
         last_price = data.iloc[-1]["spot_price"]
         if not pd.isna(last_price):
-            spot_revenue = position.spot_qty * last_price
+            notional = position.spot_qty * last_price
             exit_fees = (
-                spot_revenue * config.spot_fee_rate
-                + spot_revenue * config.futures_fee_rate
+                notional * config.spot_fee_rate
+                + notional * config.futures_fee_rate
             )
-            cash += spot_revenue - exit_fees
+            # Return invested capital (delta-neutral: price change cancels)
+            invested = position.spot_qty * position.spot_entry_price
+            cash += invested - exit_fees
             total_fees += exit_fees
 
             pnl = (
-                spot_revenue
-                - position.spot_qty * position.spot_entry_price
-                + position.accumulated_fr
+                position.accumulated_fr
                 - position.entry_fees
                 - exit_fees
             )
@@ -405,11 +406,11 @@ def arbitrage_parameter_sweep(
 ) -> list[ArbitrageBacktestResult]:
     """Sweep entry/exit parameters to find optimal configuration."""
     if entry_thresholds is None:
-        entry_thresholds = [0.0001, 0.0003, 0.0005, 0.001]
+        entry_thresholds = [0.00002, 0.00005, 0.0001, 0.0003, 0.0005]
     if exit_thresholds is None:
-        exit_thresholds = [0.0, 0.0001, 0.0003]
+        exit_thresholds = [0.0, 0.00001, 0.00005]
     if exit_periods is None:
-        exit_periods = [1, 3, 5]
+        exit_periods = [1, 3, 5, 10]
 
     if fr_df is None:
         fr_df = fetch_funding_rate_history(symbol, total=periods)

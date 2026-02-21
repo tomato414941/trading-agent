@@ -26,5 +26,17 @@ class AgentConfig:
     signal_candle_limit: int = 100
 
 
+@dataclass
+class ArbitrageConfig:
+    entry_fr_threshold: float = 0.0003  # 0.03%/8h: open when FR exceeds this
+    exit_fr_threshold: float = 0.0001   # 0.01%/8h: consider closing below this
+    exit_consecutive_periods: int = 3   # close after N consecutive low-FR periods
+    spot_fee_rate: float = 0.001        # 0.1% per spot trade
+    futures_fee_rate: float = 0.0005    # 0.05% per futures trade
+    position_fraction: float = 0.3      # fraction of capital per position
+    futures_leverage: float = 1.0       # 1x = fully collateralized (no liquidation risk)
+
+
 DEFAULT_RISK = RiskConfig()
 DEFAULT_AGENT = AgentConfig()
+DEFAULT_ARBITRAGE = ArbitrageConfig()

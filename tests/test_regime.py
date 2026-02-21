@@ -1,5 +1,3 @@
-import pytest
-
 from trading_agent.regime import compute_regime, regime_allows_buy, RegimeState
 
 

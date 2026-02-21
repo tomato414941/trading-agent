@@ -1,9 +1,15 @@
 """Fetch OHLCV data from Binance via ccxt (public API, no auth required)."""
 
+import json
+import logging
 import time
+from pathlib import Path
 
 import ccxt
 import pandas as pd
+import requests
+
+log = logging.getLogger(__name__)
 
 # Binance max per request
 _PAGE_SIZE = 1000
@@ -145,3 +151,139 @@ def fetch_funding_rate_history(
     df = df.rename(columns={"fundingRate": "funding_rate"})
     df = df[["timestamp", "funding_rate"]].drop_duplicates("timestamp").sort_values("timestamp")
     return df.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# On-chain data: BGeometrics (bitcoin-data.com)
+# ---------------------------------------------------------------------------
+
+_BG_BASE = "https://bitcoin-data.com/api/v1"
+_BG_CACHE_DIR = Path("data/onchain_cache")
+
+# Metrics we care about for trading signals (Tier S + A from research)
+ONCHAIN_METRICS = {
+    "sth_sopr": "sth-sopr",
+    "exchange_netflow": "exchange-netflow",
+    "sth_mvrv": "sth-mvrv",
+    "lth_position_change": "lth-net-position-change-30d",
+    "mvrv_zscore": "mvrv-zscore",
+    "nupl": "nupl",
+    "puell_multiple": "puell-multiple",
+    "active_addresses": "active-addresses",
+}
+
+
+def _bg_cache_path(metric_key: str) -> Path:
+    return _BG_CACHE_DIR / f"{metric_key}.json"
+
+
+def fetch_onchain_metric(
+    metric_key: str,
+    max_age_hours: float = 12,
+) -> pd.DataFrame:
+    """Fetch a single on-chain metric from BGeometrics with local cache.
+
+    Returns DataFrame with columns: [date, value].
+    Uses file cache to respect the 8 req/hour rate limit.
+    """
+    if metric_key not in ONCHAIN_METRICS:
+        raise ValueError(f"Unknown metric: {metric_key}. Available: {list(ONCHAIN_METRICS)}")
+
+    api_slug = ONCHAIN_METRICS[metric_key]
+    cache_path = _bg_cache_path(metric_key)
+
+    # Check cache freshness
+    if cache_path.exists():
+        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
+        if age_hours < max_age_hours:
+            log.debug("Using cached %s (%.1fh old)", metric_key, age_hours)
+            data = json.loads(cache_path.read_text())
+            return _bg_to_dataframe(data, metric_key)
+
+    # Fetch from API
+    url = f"{_BG_BASE}/{api_slug}"
+    log.info("Fetching on-chain metric: %s", url)
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    # Save cache
+    _BG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(data))
+    log.info("Cached %s: %d records", metric_key, len(data))
+
+    return _bg_to_dataframe(data, metric_key)
+
+
+def _bg_to_dataframe(data: list[dict], metric_key: str) -> pd.DataFrame:
+    """Convert BGeometrics JSON to DataFrame with [date, value] columns."""
+    if not data:
+        return pd.DataFrame(columns=["date", "value"])
+
+    # BGeometrics format: {"d": "2024-01-01", "unixTs": "...", "<metric>": "1.23"}
+    # The value field name varies per metric; grab the non-standard field
+    standard_keys = {"d", "unixTs"}
+    sample = data[0]
+    value_keys = [k for k in sample.keys() if k not in standard_keys]
+    if not value_keys:
+        raise ValueError(f"No value field found in {metric_key} response")
+    value_field = value_keys[0]
+
+    rows = []
+    for rec in data:
+        try:
+            val = float(rec[value_field])
+            rows.append({"date": rec["d"], "value": val})
+        except (ValueError, KeyError, TypeError):
+            continue
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    return df.sort_values("date").reset_index(drop=True)
+
+
+def fetch_all_onchain(max_age_hours: float = 12) -> dict[str, pd.DataFrame]:
+    """Fetch all configured on-chain metrics. Respects cache to stay within rate limit."""
+    result = {}
+    for key in ONCHAIN_METRICS:
+        try:
+            result[key] = fetch_onchain_metric(key, max_age_hours=max_age_hours)
+        except Exception as e:
+            log.warning("Failed to fetch %s: %s", key, e)
+    return result
+
+
+def get_latest_onchain(max_age_hours: float = 12) -> dict[str, float]:
+    """Get latest value for each on-chain metric. Returns {metric_key: value}."""
+    latest = {}
+    for key in ONCHAIN_METRICS:
+        try:
+            df = fetch_onchain_metric(key, max_age_hours=max_age_hours)
+            if not df.empty:
+                latest[key] = df.iloc[-1]["value"]
+        except Exception as e:
+            log.warning("Failed to get latest %s: %s", key, e)
+    return latest
+
+
+def merge_onchain_daily(
+    df: pd.DataFrame,
+    onchain: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Merge on-chain daily data into an hourly OHLCV DataFrame.
+
+    On-chain data is daily; we forward-fill to align with hourly candles.
+    """
+    df = df.copy()
+    df["_date"] = df["timestamp"].dt.normalize()
+
+    for key, oc_df in onchain.items():
+        if oc_df.empty:
+            continue
+        oc = oc_df.rename(columns={"date": "_date", "value": key})
+        oc["_date"] = oc["_date"].dt.normalize()
+        df = pd.merge(df, oc[["_date", key]], on="_date", how="left")
+        df[key] = df[key].ffill().fillna(0)
+
+    df = df.drop(columns=["_date"])
+    return df

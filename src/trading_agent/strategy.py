@@ -245,5 +245,78 @@ def bb_volume_funding_signal(
     return "hold"
 
 
+def onchain_signal(row: pd.Series, prev_row: pd.Series | None) -> str:
+    """On-chain data composite signal using BGeometrics metrics.
+
+    Buy conditions (accumulation zone):
+      - STH-SOPR < 1.0 (short-term holders selling at loss = capitulation)
+      - STH-MVRV < 1.0 (short-term holders underwater)
+      - Exchange netflow negative (BTC leaving exchanges)
+    Sell conditions (distribution zone):
+      - STH-SOPR > 1.05 (short-term holders taking profit aggressively)
+      - STH-MVRV > 1.3 (short-term holders heavily in profit)
+      - Exchange netflow positive (BTC flowing into exchanges for selling)
+
+    Requires at least 2 of 3 conditions to trigger.
+    """
+    buy_score = 0
+    sell_score = 0
+
+    sth_sopr = row.get("sth_sopr", 1.0)
+    sth_mvrv = row.get("sth_mvrv", 1.0)
+    netflow = row.get("exchange_netflow", 0.0)
+
+    if not pd.isna(sth_sopr):
+        if sth_sopr < 1.0:
+            buy_score += 1
+        elif sth_sopr > 1.05:
+            sell_score += 1
+
+    if not pd.isna(sth_mvrv):
+        if sth_mvrv < 1.0:
+            buy_score += 1
+        elif sth_mvrv > 1.3:
+            sell_score += 1
+
+    if not pd.isna(netflow):
+        if netflow < 0:
+            buy_score += 1
+        elif netflow > 0:
+            sell_score += 1
+
+    if buy_score >= 2:
+        return "buy"
+    if sell_score >= 2:
+        return "sell"
+    return "hold"
+
+
+def bb_onchain_signal(row: pd.Series, prev_row: pd.Series | None) -> str:
+    """BB + Volume + On-chain composite.
+
+    Combines technical (BB breakout + volume) with on-chain sentiment.
+    Both must agree or on-chain overrides on strong consensus (3/3).
+    """
+    bb_sig = bb_volume_signal(row, prev_row)
+    oc_sig = onchain_signal(row, prev_row)
+
+    # Both agree = strong signal
+    if bb_sig == oc_sig and bb_sig != "hold":
+        return bb_sig
+    # BB technical signal
+    if bb_sig != "hold":
+        return bb_sig
+    # Strong on-chain consensus overrides
+    sth_sopr = row.get("sth_sopr", 1.0)
+    sth_mvrv = row.get("sth_mvrv", 1.0)
+    netflow = row.get("exchange_netflow", 0.0)
+    # All 3 on-chain metrics agree = override
+    if oc_sig == "buy" and sth_sopr < 1.0 and sth_mvrv < 1.0 and netflow < 0:
+        return "buy"
+    if oc_sig == "sell" and sth_sopr > 1.05 and sth_mvrv > 1.3 and netflow > 0:
+        return "sell"
+    return "hold"
+
+
 def generate_signal(df: pd.DataFrame) -> str:
     return rsi_signal(df.iloc[-1]["rsi"])

@@ -9,6 +9,8 @@ from trading_agent.strategy import (
     bb_rsi_signal,
     funding_rate_signal,
     bb_volume_funding_signal,
+    onchain_signal,
+    bb_onchain_signal,
     SignalFilter,
 )
 
@@ -202,3 +204,73 @@ class TestBBVolumeFundingSignal:
     def test_no_signal(self):
         row = self._make_row(close=100, bb_lower=96, bb_upper=104, vol_ratio=1.0)
         assert bb_volume_funding_signal(row, None, funding_rate=0.0) == "hold"
+
+
+class TestOnchainSignal:
+    @staticmethod
+    def _make_row(**kwargs):
+        defaults = {"sth_sopr": 1.0, "sth_mvrv": 1.0, "exchange_netflow": 0.0}
+        defaults.update(kwargs)
+        return pd.Series(defaults)
+
+    def test_buy_capitulation(self):
+        row = self._make_row(sth_sopr=0.95, sth_mvrv=0.9, exchange_netflow=-100)
+        assert onchain_signal(row, None) == "buy"
+
+    def test_buy_two_of_three(self):
+        row = self._make_row(sth_sopr=0.95, sth_mvrv=0.9, exchange_netflow=50)
+        assert onchain_signal(row, None) == "buy"
+
+    def test_sell_distribution(self):
+        row = self._make_row(sth_sopr=1.1, sth_mvrv=1.4, exchange_netflow=100)
+        assert onchain_signal(row, None) == "sell"
+
+    def test_sell_two_of_three(self):
+        row = self._make_row(sth_sopr=1.1, sth_mvrv=1.4, exchange_netflow=-50)
+        assert onchain_signal(row, None) == "sell"
+
+    def test_hold_mixed(self):
+        row = self._make_row(sth_sopr=0.95, sth_mvrv=1.1, exchange_netflow=50)
+        assert onchain_signal(row, None) == "hold"
+
+    def test_hold_neutral(self):
+        row = self._make_row(sth_sopr=1.02, sth_mvrv=1.1, exchange_netflow=0)
+        assert onchain_signal(row, None) == "hold"
+
+    def test_nan_handling(self):
+        row = self._make_row(sth_sopr=float("nan"), sth_mvrv=0.9, exchange_netflow=-100)
+        assert onchain_signal(row, None) == "buy"
+
+
+class TestBBOnchainSignal:
+    @staticmethod
+    def _make_row(**kwargs):
+        defaults = {
+            "close": 100, "bb_lower": 96, "bb_upper": 104,
+            "vol_ratio": 1.0, "vol_sma": 100, "volume": 100,
+            "sth_sopr": 1.0, "sth_mvrv": 1.0, "exchange_netflow": 0.0,
+        }
+        defaults.update(kwargs)
+        return pd.Series(defaults)
+
+    def test_both_agree_buy(self):
+        row = self._make_row(
+            close=95, bb_lower=96, vol_ratio=2.0,
+            sth_sopr=0.95, sth_mvrv=0.9, exchange_netflow=-100,
+        )
+        assert bb_onchain_signal(row, None) == "buy"
+
+    def test_bb_only(self):
+        row = self._make_row(close=95, bb_lower=96, vol_ratio=2.0)
+        assert bb_onchain_signal(row, None) == "buy"
+
+    def test_strong_onchain_override(self):
+        row = self._make_row(
+            close=100, bb_lower=96, vol_ratio=1.0,
+            sth_sopr=0.9, sth_mvrv=0.8, exchange_netflow=-500,
+        )
+        assert bb_onchain_signal(row, None) == "buy"
+
+    def test_hold_when_no_signals(self):
+        row = self._make_row()
+        assert bb_onchain_signal(row, None) == "hold"

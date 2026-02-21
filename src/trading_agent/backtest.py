@@ -20,6 +20,8 @@ from trading_agent.strategy import (
     bb_rsi_signal,
     bb_volume_funding_signal,
     funding_rate_signal,
+    onchain_signal,
+    bb_onchain_signal,
     sentiment_multiplier,
     SignalFilter,
     DEFAULT_BUY_COOLDOWN,
@@ -160,6 +162,8 @@ STRATEGIES: dict[str, Callable] = {
     "bb+rsi+vol": signal_bb_rsi,
     "funding": signal_funding,
     "bb+vol+fr": signal_bb_vol_funding,
+    "onchain": onchain_signal,
+    "bb+onchain": bb_onchain_signal,
 }
 
 

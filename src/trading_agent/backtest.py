@@ -10,7 +10,8 @@ import pandas as pd
 from itertools import product
 from pathlib import Path
 
-from trading_agent.fetcher import fetch_ohlcv, fetch_ohlcv_paginated
+from trading_agent.fetcher import fetch_ohlcv, fetch_ohlcv_paginated, _TF_MS
+from trading_agent.regime import ADX_TREND_THRESHOLD
 from trading_agent.strategy import (
     compute_indicators,
     rsi_signal,
@@ -79,6 +80,75 @@ STRATEGIES: dict[str, Callable] = {
 }
 
 
+def _resample_to_regime(
+    df: pd.DataFrame,
+    signal_tf: str,
+    regime_tf: str,
+) -> pd.DataFrame:
+    """Resample signal-timeframe OHLCV to regime-timeframe for EMA/ADX."""
+    tf_ratio = _TF_MS.get(regime_tf, 14_400_000) // _TF_MS.get(signal_tf, 3_600_000)
+    if tf_ratio <= 1:
+        return df.copy()
+
+    df = df.copy().reset_index(drop=True)
+    df["group"] = df.index // tf_ratio
+    resampled = df.groupby("group").agg({
+        "timestamp": "first",
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }).reset_index(drop=True)
+    return resampled
+
+
+def _precompute_regime_column(
+    df: pd.DataFrame,
+    signal_tf: str,
+    regime_tf: str,
+) -> list[str]:
+    """Pre-compute regime classification for each signal candle.
+
+    Computes EMA-200 and ADX once on the resampled dataframe, then
+    classifies each row. O(n) instead of O(n^2).
+    """
+    from ta.trend import ADXIndicator, EMAIndicator
+
+    regime_df = _resample_to_regime(df, signal_tf, regime_tf)
+    tf_ratio = _TF_MS.get(regime_tf, 14_400_000) // _TF_MS.get(signal_tf, 3_600_000)
+    tf_ratio = max(tf_ratio, 1)
+
+    # Compute indicators once on the full resampled df
+    rdf = regime_df.copy()
+    rdf["ema200"] = EMAIndicator(close=rdf["close"], window=200).ema_indicator()
+    adx_ind = ADXIndicator(high=rdf["high"], low=rdf["low"], close=rdf["close"], window=14)
+    rdf["adx"] = adx_ind.adx()
+
+    # Classify each regime candle
+    regime_per_candle: list[str] = []
+    for _, row in rdf.iterrows():
+        ema200 = row["ema200"]
+        adx = row["adx"]
+        price = row["close"]
+        if pd.isna(ema200) or pd.isna(adx):
+            regime_per_candle.append("ranging")
+        elif adx < ADX_TREND_THRESHOLD:
+            regime_per_candle.append("ranging")
+        elif price > ema200:
+            regime_per_candle.append("uptrend")
+        else:
+            regime_per_candle.append("downtrend")
+
+    # Map back to signal candles
+    regimes: list[str] = []
+    for i in range(len(df)):
+        regime_idx = min(i // tf_ratio, len(regime_per_candle) - 1)
+        regimes.append(regime_per_candle[regime_idx])
+
+    return regimes
+
+
 def run_backtest(
     symbol: str = "BTC/USDT",
     timeframe: str = "1h",
@@ -92,6 +162,8 @@ def run_backtest(
     max_exposure_pct: float = 100.0,
     strategy: str = "rsi",
     sentiment_score: float = 0.0,
+    regime_filter: bool = False,
+    regime_timeframe: str = "4h",
     df: pd.DataFrame | None = None,
 ) -> BacktestResult:
     if df is None:
@@ -100,6 +172,11 @@ def run_backtest(
     df = df.reset_index(drop=True)
 
     signal_fn = STRATEGIES[strategy]
+
+    # Pre-compute regime column if enabled
+    regime_col: list[str] | None = None
+    if regime_filter:
+        regime_col = _precompute_regime_column(df, timeframe, regime_timeframe)
 
     # Sentiment adjusts buy size, not direction
     sent_mult = sentiment_multiplier(sentiment_score)
@@ -220,6 +297,11 @@ def run_backtest(
         signal = sig_filter.filter(raw)
         prev_row = row
 
+        # Regime filter: block buys in downtrend
+        if regime_col is not None and signal == "buy":
+            if regime_col[i] == "downtrend":
+                signal = "hold"
+
         if signal in ("buy", "sell"):
             pending_signal = signal
 
@@ -299,6 +381,8 @@ def parameter_sweep(
     cooldowns: list[int] | None = None,
     stop_losses: list[float] | None = None,
     take_profits: list[float] | None = None,
+    regime_filter: bool = False,
+    regime_timeframe: str = "4h",
     df: pd.DataFrame | None = None,
 ) -> list[BacktestResult]:
     if rsi_windows is None:
@@ -326,6 +410,8 @@ def parameter_sweep(
             stop_loss_pct=sl,
             take_profit_pct=tp,
             strategy=strategy,
+            regime_filter=regime_filter,
+            regime_timeframe=regime_timeframe,
             df=df_ind,
         )
         r.strategy_name = f"rsi{rsi_w}_cd{cd}_sl{sl}_tp{tp}"
@@ -365,25 +451,30 @@ if __name__ == "__main__":
     DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
     if "--sweep" in sys.argv:
-        # python -m trading_agent.backtest --sweep BTC/USDT --limit 1000
-        args = [a for a in sys.argv[1:] if a != "--sweep"]
+        # python -m trading_agent.backtest --sweep BTC/USDT --limit 1000 --regime
+        args = [a for a in sys.argv[1:] if a not in ("--sweep", "--regime")]
         symbol = args[0] if args else "BTC/USDT"
         limit = 1000
         timeframe = "1h"
+        use_regime = "--regime" in sys.argv
         for i, a in enumerate(args):
             if a == "--limit" and i + 1 < len(args):
                 limit = int(args[i + 1])
             if a == "--tf" and i + 1 < len(args):
                 timeframe = args[i + 1]
 
-        print(f"Fetching {limit} candles for {symbol} ({timeframe})...")
+        regime_label = " +regime" if use_regime else ""
+        print(f"Fetching {limit} candles for {symbol} ({timeframe}{regime_label})...")
         if limit > 1000:
             df = fetch_ohlcv_paginated(symbol, timeframe, total=limit)
         else:
             df = fetch_ohlcv(symbol, timeframe, limit)
         print(f"Got {len(df)} candles: {df.iloc[0]['timestamp']} → {df.iloc[-1]['timestamp']}")
 
-        results = parameter_sweep(symbol, timeframe, limit, df=df)
+        results = parameter_sweep(
+            symbol, timeframe, limit,
+            regime_filter=use_regime, df=df,
+        )
         print("\nTop 10 results:")
         print(compare(results[:10]))
 

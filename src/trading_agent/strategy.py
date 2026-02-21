@@ -203,7 +203,7 @@ def bb_rsi_signal(
     return "hold"
 
 
-def funding_rate_signal(funding_rate: float, threshold: float = 0.0005) -> str:
+def funding_rate_signal(funding_rate: float, threshold: float = 0.0001) -> str:
     """Funding rate mean-reversion signal.
 
     High positive FR (>threshold): longs pay shorts → market overheated → sell

@@ -26,6 +26,61 @@ DEFAULT_FEE_RATE = 0.001
 
 
 @dataclass
+class WalkForwardWindow:
+    window_num: int
+    train_start: str
+    train_end: str
+    test_start: str
+    test_end: str
+    best_params: str
+    train_return_pct: float
+    test_return_pct: float
+    test_trades: int
+    test_win_rate: float
+    test_max_dd_pct: float
+    test_sharpe: float
+
+
+@dataclass
+class WalkForwardResult:
+    symbol: str
+    timeframe: str
+    num_windows: int
+    train_size: int
+    test_size: int
+    windows: list[WalkForwardWindow] = field(default_factory=list)
+    aggregate_return_pct: float = 0.0
+    aggregate_trades: int = 0
+    aggregate_win_rate: float = 0.0
+    avg_max_dd_pct: float = 0.0
+    avg_sharpe: float = 0.0
+    robustness_pct: float = 0.0
+
+    def summary(self) -> str:
+        lines = [
+            "=== Walk-Forward Validation ===",
+            f"Symbol:          {self.symbol}",
+            f"Timeframe:       {self.timeframe}",
+            f"Windows:         {self.num_windows}  (train={self.train_size}, test={self.test_size})",
+            f"OOS Return:      {self.aggregate_return_pct:+.2f}%  (compounded)",
+            f"OOS Trades:      {self.aggregate_trades}",
+            f"OOS Win Rate:    {self.aggregate_win_rate:.1f}%",
+            f"Avg Max DD:      {self.avg_max_dd_pct:.2f}%",
+            f"Avg Sharpe:      {self.avg_sharpe:.2f}",
+            f"Robustness:      {self.robustness_pct:.0f}%  ({sum(1 for w in self.windows if w.test_return_pct > 0)}/{self.num_windows} profitable)",
+            "",
+            "--- Per-Window ---",
+        ]
+        for w in self.windows:
+            lines.append(
+                f"  W{w.window_num}: train {w.train_return_pct:+.2f}% → test {w.test_return_pct:+.2f}%  "
+                f"({w.test_trades} trades, WR {w.test_win_rate:.0f}%, DD {w.test_max_dd_pct:.1f}%)  "
+                f"[{w.best_params}]"
+            )
+        return "\n".join(lines)
+
+
+@dataclass
 class BacktestResult:
     strategy_name: str
     initial_cash: float
@@ -424,6 +479,151 @@ def parameter_sweep(
     return results
 
 
+def _parse_sweep_params(name: str) -> dict:
+    """Parse sweep strategy name like 'rsi14_cd12_sl3_tp10' back to params."""
+    import re
+    m = re.match(r"rsi(\d+)_cd(\d+)_sl([\d.]+)_tp([\d.]+)", name)
+    if not m:
+        return {}
+    return {
+        "rsi_window": int(m.group(1)),
+        "buy_cooldown": int(m.group(2)),
+        "stop_loss_pct": float(m.group(3)),
+        "take_profit_pct": float(m.group(4)),
+    }
+
+
+def walk_forward_validation(
+    symbol: str = "BTC/USDT",
+    timeframe: str = "1h",
+    train_size: int = 1000,
+    test_size: int = 500,
+    step_size: int = 500,
+    strategy: str = "rsi+macd",
+    regime_filter: bool = False,
+    regime_timeframe: str = "4h",
+    df: pd.DataFrame | None = None,
+) -> WalkForwardResult:
+    """Walk-forward validation: optimize on train, evaluate on test, roll forward.
+
+    Splits data into rolling windows of (train_size + test_size), stepping
+    forward by step_size each iteration. On each window, runs parameter_sweep
+    on the training portion, then evaluates the best parameters on the
+    unseen test portion.
+    """
+    if df is None:
+        total_needed = train_size + test_size + step_size * 5
+        df = fetch_ohlcv_paginated(symbol, timeframe, total=total_needed)
+
+    df = df.reset_index(drop=True)
+    n = len(df)
+
+    windows: list[WalkForwardWindow] = []
+    start = 0
+    window_num = 0
+
+    while start + train_size + test_size <= n:
+        window_num += 1
+        train_df = df.iloc[start : start + train_size].reset_index(drop=True)
+        test_df = df.iloc[start + train_size : start + train_size + test_size].reset_index(drop=True)
+
+        # Optimize on training data
+        sweep_results = parameter_sweep(
+            symbol=symbol,
+            timeframe=timeframe,
+            strategy=strategy,
+            regime_filter=regime_filter,
+            regime_timeframe=regime_timeframe,
+            df=train_df,
+        )
+
+        best = sweep_results[0]
+        params = _parse_sweep_params(best.strategy_name)
+
+        # Evaluate on test data with optimized params
+        test_df_ind = compute_indicators(
+            test_df.copy(),
+            rsi_window=params.get("rsi_window", 14),
+        )
+        test_result = run_backtest(
+            symbol=symbol,
+            timeframe=timeframe,
+            buy_cooldown=params.get("buy_cooldown", DEFAULT_BUY_COOLDOWN),
+            stop_loss_pct=params.get("stop_loss_pct", 0.0),
+            take_profit_pct=params.get("take_profit_pct", 0.0),
+            strategy=strategy,
+            regime_filter=regime_filter,
+            regime_timeframe=regime_timeframe,
+            df=test_df_ind,
+        )
+
+        wf_window = WalkForwardWindow(
+            window_num=window_num,
+            train_start=str(train_df.iloc[0]["timestamp"]),
+            train_end=str(train_df.iloc[-1]["timestamp"]),
+            test_start=str(test_df.iloc[0]["timestamp"]),
+            test_end=str(test_df.iloc[-1]["timestamp"]),
+            best_params=best.strategy_name,
+            train_return_pct=best.total_return_pct,
+            test_return_pct=test_result.total_return_pct,
+            test_trades=test_result.num_trades,
+            test_win_rate=test_result.win_rate,
+            test_max_dd_pct=test_result.max_drawdown_pct,
+            test_sharpe=test_result.sharpe_ratio,
+        )
+        windows.append(wf_window)
+
+        if window_num % 2 == 0 or start + train_size + test_size + step_size > n:
+            print(f"  walk-forward: window {window_num} done "
+                  f"(train {best.total_return_pct:+.2f}% → test {test_result.total_return_pct:+.2f}%)")
+
+        start += step_size
+
+    # Aggregate out-of-sample metrics
+    if not windows:
+        return WalkForwardResult(
+            symbol=symbol,
+            timeframe=timeframe,
+            num_windows=0,
+            train_size=train_size,
+            test_size=test_size,
+        )
+
+    # Compounded OOS return
+    compounded = 1.0
+    for w in windows:
+        compounded *= (1 + w.test_return_pct / 100)
+    aggregate_return_pct = (compounded - 1) * 100
+
+    total_trades = sum(w.test_trades for w in windows)
+
+    # Weighted average win rate by trade count
+    if total_trades > 0:
+        agg_win_rate = sum(w.test_win_rate * w.test_trades for w in windows) / total_trades
+    else:
+        agg_win_rate = 0.0
+
+    avg_dd = sum(w.test_max_dd_pct for w in windows) / len(windows)
+    avg_sharpe = sum(w.test_sharpe for w in windows) / len(windows)
+    profitable_windows = sum(1 for w in windows if w.test_return_pct > 0)
+    robustness = (profitable_windows / len(windows)) * 100
+
+    return WalkForwardResult(
+        symbol=symbol,
+        timeframe=timeframe,
+        num_windows=len(windows),
+        train_size=train_size,
+        test_size=test_size,
+        windows=windows,
+        aggregate_return_pct=aggregate_return_pct,
+        aggregate_trades=total_trades,
+        aggregate_win_rate=agg_win_rate,
+        avg_max_dd_pct=avg_dd,
+        avg_sharpe=avg_sharpe,
+        robustness_pct=robustness,
+    )
+
+
 def save_sweep_results(results: list[BacktestResult], path: str | Path) -> None:
     path = Path(path)
     rows = []
@@ -450,18 +650,65 @@ if __name__ == "__main__":
 
     DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
-    if "--sweep" in sys.argv:
-        # python -m trading_agent.backtest --sweep BTC/USDT --limit 1000 --regime
-        args = [a for a in sys.argv[1:] if a not in ("--sweep", "--regime")]
-        symbol = args[0] if args else "BTC/USDT"
+    def _parse_cli_args(argv: list[str], exclude_flags: list[str] | None = None) -> tuple[str, int, str, bool]:
+        """Parse common CLI args: symbol, limit, timeframe, regime flag."""
+        exclude = set(exclude_flags or [])
+        args = [a for a in argv[1:] if a not in exclude]
+        symbol = "BTC/USDT"
         limit = 1000
         timeframe = "1h"
-        use_regime = "--regime" in sys.argv
+        use_regime = "--regime" in argv
         for i, a in enumerate(args):
+            if a not in ("--limit", "--tf") and not a.startswith("--") and "/" in a:
+                symbol = a
             if a == "--limit" and i + 1 < len(args):
                 limit = int(args[i + 1])
             if a == "--tf" and i + 1 < len(args):
                 timeframe = args[i + 1]
+        return symbol, limit, timeframe, use_regime
+
+    if "--walk-forward" in sys.argv:
+        # python -m trading_agent.backtest --walk-forward BTC/USDT --limit 5000 --regime
+        symbol, limit, timeframe, use_regime = _parse_cli_args(
+            sys.argv, ["--walk-forward", "--regime"])
+        train_size = 1000
+        test_size = 500
+        step_size = 500
+        for i, a in enumerate(sys.argv):
+            if a == "--train" and i + 1 < len(sys.argv):
+                train_size = int(sys.argv[i + 1])
+            if a == "--test" and i + 1 < len(sys.argv):
+                test_size = int(sys.argv[i + 1])
+            if a == "--step" and i + 1 < len(sys.argv):
+                step_size = int(sys.argv[i + 1])
+
+        regime_label = " +regime" if use_regime else ""
+        print(f"Walk-Forward: {symbol} ({timeframe}{regime_label})")
+        print(f"  train={train_size}, test={test_size}, step={step_size}")
+        print(f"Fetching {limit} candles...")
+
+        if limit > 1000:
+            df = fetch_ohlcv_paginated(symbol, timeframe, total=limit)
+        else:
+            df = fetch_ohlcv(symbol, timeframe, limit)
+        print(f"Got {len(df)} candles: {df.iloc[0]['timestamp']} → {df.iloc[-1]['timestamp']}\n")
+
+        wf_result = walk_forward_validation(
+            symbol=symbol,
+            timeframe=timeframe,
+            train_size=train_size,
+            test_size=test_size,
+            step_size=step_size,
+            regime_filter=use_regime,
+            df=df,
+        )
+        print()
+        print(wf_result.summary())
+
+    elif "--sweep" in sys.argv:
+        # python -m trading_agent.backtest --sweep BTC/USDT --limit 1000 --regime
+        symbol, limit, timeframe, use_regime = _parse_cli_args(
+            sys.argv, ["--sweep", "--regime"])
 
         regime_label = " +regime" if use_regime else ""
         print(f"Fetching {limit} candles for {symbol} ({timeframe}{regime_label})...")

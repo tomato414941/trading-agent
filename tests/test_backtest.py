@@ -1,5 +1,5 @@
 import pytest
-from trading_agent.backtest import run_backtest
+from trading_agent.backtest import run_backtest, walk_forward_validation, _parse_sweep_params
 
 
 class TestBacktestEngine:
@@ -87,3 +87,94 @@ class TestBacktestRegime:
         # In uptrend, regime filter should not block many trades
         # (may still differ due to regime transition during dip)
         assert r_yes.num_trades <= r_no.num_trades or r_yes.num_trades >= 0
+
+
+class TestWalkForward:
+    def test_parse_sweep_params(self):
+        params = _parse_sweep_params("rsi14_cd12_sl3_tp10")
+        assert params == {
+            "rsi_window": 14,
+            "buy_cooldown": 12,
+            "stop_loss_pct": 3.0,
+            "take_profit_pct": 10.0,
+        }
+
+    def test_parse_sweep_params_floats(self):
+        params = _parse_sweep_params("rsi20_cd6_sl5.5_tp15.0")
+        assert params["stop_loss_pct"] == 5.5
+        assert params["take_profit_pct"] == 15.0
+
+    def test_parse_sweep_params_invalid(self):
+        assert _parse_sweep_params("invalid") == {}
+
+    def test_walk_forward_basic(self, make_ohlcv_df):
+        # Create enough data for at least 1 window: train=60 + test=30 = 90
+        # Downtrend then recovery pattern repeated
+        closes = []
+        for _ in range(3):
+            closes += [100.0] * 10 + [90.0 - i * 2 for i in range(15)] + [70.0 + i * 3 for i in range(15)]
+        df = make_ohlcv_df(closes)
+
+        result = walk_forward_validation(
+            timeframe="1h",
+            train_size=60,
+            test_size=30,
+            step_size=30,
+            strategy="rsi",
+            df=df,
+        )
+        assert result.num_windows >= 1
+        assert result.train_size == 60
+        assert result.test_size == 30
+        assert len(result.windows) == result.num_windows
+        for w in result.windows:
+            assert w.train_start != ""
+            assert w.test_start != ""
+            assert w.best_params != ""
+
+    def test_walk_forward_insufficient_data(self, make_ohlcv_df):
+        # Too few candles for even 1 window
+        closes = [100.0] * 20
+        df = make_ohlcv_df(closes)
+        result = walk_forward_validation(
+            timeframe="1h",
+            train_size=100,
+            test_size=50,
+            step_size=50,
+            df=df,
+        )
+        assert result.num_windows == 0
+        assert result.windows == []
+
+    def test_walk_forward_robustness_range(self, make_ohlcv_df):
+        closes = []
+        for _ in range(5):
+            closes += [100.0 + i * 0.5 for i in range(30)]
+        df = make_ohlcv_df(closes)
+        result = walk_forward_validation(
+            timeframe="1h",
+            train_size=60,
+            test_size=30,
+            step_size=30,
+            strategy="rsi",
+            df=df,
+        )
+        assert 0.0 <= result.robustness_pct <= 100.0
+
+    def test_walk_forward_summary_format(self, make_ohlcv_df):
+        closes = []
+        for _ in range(3):
+            closes += [100.0] * 10 + [90.0 - i * 2 for i in range(15)] + [70.0 + i * 3 for i in range(15)]
+        df = make_ohlcv_df(closes)
+        result = walk_forward_validation(
+            timeframe="1h",
+            train_size=60,
+            test_size=30,
+            step_size=30,
+            strategy="rsi",
+            df=df,
+        )
+        summary = result.summary()
+        assert "Walk-Forward Validation" in summary
+        assert "OOS Return" in summary
+        assert "Robustness" in summary

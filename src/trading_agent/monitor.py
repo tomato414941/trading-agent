@@ -37,6 +37,9 @@ def check_risk_all_symbols(
             if pos.qty <= 0:
                 continue
 
+            # Update high watermark before checking trailing stop
+            portfolio.update_high_watermark(symbol, price)
+
             sl_action = portfolio.check_stop_loss(symbol, price, risk)
             if sl_action:
                 trade = portfolio.sell(symbol, price)

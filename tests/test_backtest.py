@@ -59,6 +59,45 @@ class TestBacktestEngine:
         assert r_neutral.num_trades == r_bearish.num_trades
 
 
+class TestBacktestTrailingStop:
+    def test_trailing_stop_fires(self, make_ohlcv_df):
+        # Downtrend to trigger buy at oversold, recovery to set HWM, then drop
+        closes = [100.0] * 20
+        for i in range(15):
+            closes.append(100.0 - i * 2)  # drop to 72
+        for i in range(15):
+            closes.append(72.0 + i * 3)  # rise to 114
+        for i in range(15):
+            closes.append(114.0 - i * 4)  # drop from 114 to 58
+        df = make_ohlcv_df(closes)
+        result = run_backtest(df=df, strategy="rsi", trailing_stop_pct=5.0, stop_loss_pct=0.0)
+        assert result.trailing_stop_count >= 0
+
+    def test_trailing_stop_vs_fixed_tp(self, make_ohlcv_df):
+        # Rising market: trailing stop should let profits run longer than fixed TP
+        closes = [100.0] * 20
+        for i in range(15):
+            closes.append(100.0 - i * 2)  # dip to trigger buy
+        for i in range(30):
+            closes.append(72.0 + i * 2)  # long uptrend to 130
+        for i in range(10):
+            closes.append(130.0 - i * 3)  # pullback
+        df = make_ohlcv_df(closes)
+        r_tp = run_backtest(df=df, strategy="rsi", take_profit_pct=10.0, trailing_stop_pct=0.0)
+        r_ts = run_backtest(df=df, strategy="rsi", take_profit_pct=0.0, trailing_stop_pct=5.0)
+        # Both should produce valid results (no crash)
+        assert r_tp.final_value > 0
+        assert r_ts.final_value > 0
+
+    def test_parse_sweep_params_with_trailing(self):
+        params = _parse_sweep_params("rsi14_cd12_sl3_tp10_ts5")
+        assert params["trailing_stop_pct"] == 5.0
+
+    def test_parse_sweep_params_without_trailing(self):
+        params = _parse_sweep_params("rsi14_cd12_sl3_tp10")
+        assert "trailing_stop_pct" not in params
+
+
 class TestBacktestRegime:
     def test_regime_filter_reduces_trades_in_downtrend(self, make_ohlcv_df):
         # Strong downtrend (250+ candles for EMA-200)

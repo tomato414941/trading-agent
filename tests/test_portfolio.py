@@ -102,6 +102,57 @@ class TestStopLoss:
         assert p.check_stop_loss("BTC/USDT", 55000.0, cfg) is None
 
 
+class TestTrailingStop:
+    def test_trailing_stop_triggers(self):
+        p = Portfolio(cash=10000.0)
+        p.buy("BTC/USDT", 50000.0)
+        # Price rises to 60k, then drops
+        p.update_high_watermark("BTC/USDT", 60000.0)
+        pos = p.get_position("BTC/USDT")
+        assert pos.high_watermark == 60000.0
+        # Drop from 60k to 54k = 10% from peak
+        cfg = RiskConfig(stop_loss_pct=20.0, trailing_stop_pct=10.0)
+        assert p.check_stop_loss("BTC/USDT", 54000.0, cfg) == "trailing_stop"
+
+    def test_trailing_stop_not_triggered(self):
+        p = Portfolio(cash=10000.0)
+        p.buy("BTC/USDT", 50000.0)
+        p.update_high_watermark("BTC/USDT", 55000.0)
+        # Drop from 55k to 52k = 5.5% from peak (< 10% threshold)
+        cfg = RiskConfig(stop_loss_pct=20.0, trailing_stop_pct=10.0)
+        assert p.check_stop_loss("BTC/USDT", 52000.0, cfg) is None
+
+    def test_trailing_stop_disabled_when_zero(self):
+        p = Portfolio(cash=10000.0)
+        p.buy("BTC/USDT", 50000.0)
+        p.update_high_watermark("BTC/USDT", 60000.0)
+        cfg = RiskConfig(stop_loss_pct=90.0, trailing_stop_pct=0.0)
+        # 50% drop from peak but trailing stop disabled, SL at 90% so won't trigger
+        assert p.check_stop_loss("BTC/USDT", 30000.0, cfg) is None
+
+    def test_stop_loss_takes_priority_over_trailing(self):
+        p = Portfolio(cash=10000.0)
+        p.buy("BTC/USDT", 50000.0)
+        p.update_high_watermark("BTC/USDT", 52000.0)
+        # Price at 45k: -10% from entry (SL triggers), also -13.5% from peak (TS triggers)
+        cfg = RiskConfig(stop_loss_pct=10.0, trailing_stop_pct=10.0)
+        assert p.check_stop_loss("BTC/USDT", 45000.0, cfg) == "stop_loss"
+
+    def test_high_watermark_updates_on_buy(self):
+        p = Portfolio(cash=10000.0)
+        p.buy("BTC/USDT", 50000.0)
+        pos = p.get_position("BTC/USDT")
+        assert pos.high_watermark == 50000.0
+
+    def test_high_watermark_only_increases(self):
+        p = Portfolio(cash=10000.0)
+        p.buy("BTC/USDT", 50000.0)
+        p.update_high_watermark("BTC/USDT", 55000.0)
+        p.update_high_watermark("BTC/USDT", 53000.0)  # lower, should not update
+        pos = p.get_position("BTC/USDT")
+        assert pos.high_watermark == 55000.0
+
+
 class TestCanBuy:
     def test_empty_portfolio_can_buy(self):
         p = Portfolio(cash=10000.0)

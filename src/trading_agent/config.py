@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 class RiskConfig:
     stop_loss_pct: float = 5.0
     take_profit_pct: float = 15.0
+    trailing_stop_pct: float = 0.0  # 0 = disabled; X = sell when price drops X% from peak
     max_exposure_pct: float = 60.0
     buy_fraction: float = 0.1
 

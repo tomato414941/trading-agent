@@ -93,6 +93,7 @@ class BacktestResult:
     sharpe_ratio: float
     stop_loss_count: int = 0
     take_profit_count: int = 0
+    trailing_stop_count: int = 0
     period_start: str = ""
     period_end: str = ""
     trades: list[dict] = field(default_factory=list)
@@ -111,9 +112,10 @@ class BacktestResult:
             f"Max Drawdown:    {self.max_drawdown_pct:.2f}%",
             f"Sharpe Ratio:    {self.sharpe_ratio:.2f}{low_sample}",
         ]
-        if self.stop_loss_count or self.take_profit_count:
+        if self.stop_loss_count or self.take_profit_count or self.trailing_stop_count:
             lines.append(f"Stop Loss:       {self.stop_loss_count}")
             lines.append(f"Take Profit:     {self.take_profit_count}")
+            lines.append(f"Trailing Stop:   {self.trailing_stop_count}")
         return "\n".join(lines)
 
 
@@ -214,6 +216,7 @@ def run_backtest(
     fee_rate: float = DEFAULT_FEE_RATE,
     stop_loss_pct: float = 0.0,
     take_profit_pct: float = 0.0,
+    trailing_stop_pct: float = 0.0,
     max_exposure_pct: float = 100.0,
     strategy: str = "rsi",
     sentiment_score: float = 0.0,
@@ -240,6 +243,7 @@ def run_backtest(
     cash = initial_cash
     position = 0.0
     avg_entry = 0.0
+    high_watermark = 0.0
     trades: list[dict] = []
     equity_curve: list[float] = []
     sig_filter = SignalFilter(buy_cooldown=buy_cooldown)
@@ -247,49 +251,49 @@ def run_backtest(
     pending_signal: str | None = None
     sl_count = 0
     tp_count = 0
+    ts_count = 0
 
     for i, row in df.iterrows():
         price = row["close"]
 
-        # Stop-loss / take-profit check
+        # Update high watermark
+        if position > 0:
+            high_watermark = max(high_watermark, price)
+
+        # Stop-loss / take-profit / trailing-stop check
+        exit_reason = None
         if position > 0 and avg_entry > 0:
             pnl_pct = (price - avg_entry) / avg_entry * 100
             if stop_loss_pct > 0 and pnl_pct <= -stop_loss_pct:
-                fee = position * price * fee_rate
-                revenue = position * price - fee
-                pnl = revenue - (position * avg_entry)
-                trades.append({
-                    "timestamp": row["timestamp"],
-                    "side": "sell",
-                    "price": price,
-                    "qty": position,
-                    "fee": fee,
-                    "pnl": pnl,
-                    "reason": "stop_loss",
-                })
-                cash += revenue
-                position = 0.0
-                avg_entry = 0.0
+                exit_reason = "stop_loss"
                 sl_count += 1
-                pending_signal = None
             elif take_profit_pct > 0 and pnl_pct >= take_profit_pct:
-                fee = position * price * fee_rate
-                revenue = position * price - fee
-                pnl = revenue - (position * avg_entry)
-                trades.append({
-                    "timestamp": row["timestamp"],
-                    "side": "sell",
-                    "price": price,
-                    "qty": position,
-                    "fee": fee,
-                    "pnl": pnl,
-                    "reason": "take_profit",
-                })
-                cash += revenue
-                position = 0.0
-                avg_entry = 0.0
+                exit_reason = "take_profit"
                 tp_count += 1
-                pending_signal = None
+            elif trailing_stop_pct > 0 and high_watermark > 0:
+                drop_from_peak = (high_watermark - price) / high_watermark * 100
+                if drop_from_peak >= trailing_stop_pct:
+                    exit_reason = "trailing_stop"
+                    ts_count += 1
+
+        if exit_reason:
+            fee = position * price * fee_rate
+            revenue = position * price - fee
+            pnl = revenue - (position * avg_entry)
+            trades.append({
+                "timestamp": row["timestamp"],
+                "side": "sell",
+                "price": price,
+                "qty": position,
+                "fee": fee,
+                "pnl": pnl,
+                "reason": exit_reason,
+            })
+            cash += revenue
+            position = 0.0
+            avg_entry = 0.0
+            high_watermark = 0.0
+            pending_signal = None
 
         # Execute pending signal from previous candle at this candle's open
         if pending_signal is not None and i > 0:
@@ -315,6 +319,7 @@ def run_backtest(
                 total_cost = position * avg_entry + qty * exec_price
                 position += qty
                 avg_entry = total_cost / position if position > 0 else exec_price
+                high_watermark = max(high_watermark, exec_price)
                 cash -= cost_total
                 trades.append({
                     "timestamp": row["timestamp"],
@@ -341,6 +346,7 @@ def run_backtest(
                 cash += revenue
                 position = 0.0
                 avg_entry = 0.0
+                high_watermark = 0.0
 
         pending_signal = None
 
@@ -403,6 +409,7 @@ def run_backtest(
         sharpe_ratio=sharpe_ratio,
         stop_loss_count=sl_count,
         take_profit_count=tp_count,
+        trailing_stop_count=ts_count,
         period_start=period_start,
         period_end=period_end,
         trades=trades,
@@ -436,6 +443,7 @@ def parameter_sweep(
     cooldowns: list[int] | None = None,
     stop_losses: list[float] | None = None,
     take_profits: list[float] | None = None,
+    trailing_stops: list[float] | None = None,
     regime_filter: bool = False,
     regime_timeframe: str = "4h",
     df: pd.DataFrame | None = None,
@@ -448,15 +456,17 @@ def parameter_sweep(
         stop_losses = [0, 3, 5, 8]
     if take_profits is None:
         take_profits = [0, 10, 15, 20]
+    if trailing_stops is None:
+        trailing_stops = [0]
 
     if df is None:
         df = fetch_ohlcv(symbol, timeframe, limit)
 
     results: list[BacktestResult] = []
-    combos = list(product(rsi_windows, cooldowns, stop_losses, take_profits))
+    combos = list(product(rsi_windows, cooldowns, stop_losses, take_profits, trailing_stops))
     total = len(combos)
 
-    for idx, (rsi_w, cd, sl, tp) in enumerate(combos, 1):
+    for idx, (rsi_w, cd, sl, tp, ts) in enumerate(combos, 1):
         df_ind = compute_indicators(df.copy(), rsi_window=rsi_w)
         r = run_backtest(
             symbol=symbol,
@@ -464,12 +474,13 @@ def parameter_sweep(
             buy_cooldown=cd,
             stop_loss_pct=sl,
             take_profit_pct=tp,
+            trailing_stop_pct=ts,
             strategy=strategy,
             regime_filter=regime_filter,
             regime_timeframe=regime_timeframe,
             df=df_ind,
         )
-        r.strategy_name = f"rsi{rsi_w}_cd{cd}_sl{sl}_tp{tp}"
+        r.strategy_name = f"rsi{rsi_w}_cd{cd}_sl{sl}_tp{tp}_ts{ts}"
         results.append(r)
 
         if idx % 20 == 0 or idx == total:
@@ -480,17 +491,20 @@ def parameter_sweep(
 
 
 def _parse_sweep_params(name: str) -> dict:
-    """Parse sweep strategy name like 'rsi14_cd12_sl3_tp10' back to params."""
+    """Parse sweep strategy name like 'rsi14_cd12_sl3_tp10_ts5' back to params."""
     import re
-    m = re.match(r"rsi(\d+)_cd(\d+)_sl([\d.]+)_tp([\d.]+)", name)
+    m = re.match(r"rsi(\d+)_cd(\d+)_sl([\d.]+)_tp([\d.]+)(?:_ts([\d.]+))?", name)
     if not m:
         return {}
-    return {
+    params = {
         "rsi_window": int(m.group(1)),
         "buy_cooldown": int(m.group(2)),
         "stop_loss_pct": float(m.group(3)),
         "take_profit_pct": float(m.group(4)),
     }
+    if m.group(5) is not None:
+        params["trailing_stop_pct"] = float(m.group(5))
+    return params
 
 
 def walk_forward_validation(
@@ -551,6 +565,7 @@ def walk_forward_validation(
             buy_cooldown=params.get("buy_cooldown", DEFAULT_BUY_COOLDOWN),
             stop_loss_pct=params.get("stop_loss_pct", 0.0),
             take_profit_pct=params.get("take_profit_pct", 0.0),
+            trailing_stop_pct=params.get("trailing_stop_pct", 0.0),
             strategy=strategy,
             regime_filter=regime_filter,
             regime_timeframe=regime_timeframe,

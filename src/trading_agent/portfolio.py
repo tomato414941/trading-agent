@@ -20,6 +20,7 @@ class Position:
     qty: float = 0.0
     entry_price: float = 0.0
     ticks_since_buy: int = 999
+    high_watermark: float = 0.0
 
 
 @dataclass
@@ -48,6 +49,7 @@ class Portfolio:
         total_cost = pos.qty * pos.entry_price + qty * price
         pos.qty += qty
         pos.entry_price = total_cost / pos.qty if pos.qty > 0 else price
+        pos.high_watermark = max(pos.high_watermark, price)
         self._save_pos(symbol, pos)
         return {"side": "buy", "symbol": symbol, "price": price, "qty": qty, "cost": amount_usd}
 
@@ -71,18 +73,30 @@ class Portfolio:
         self._save_pos(symbol, pos)
         return trade
 
+    def update_high_watermark(self, symbol: str, price: float) -> None:
+        """Update position's high watermark if price exceeds current peak."""
+        pos = self._pos(symbol)
+        if pos.qty > 0 and price > pos.high_watermark:
+            pos.high_watermark = price
+            self._save_pos(symbol, pos)
+
     def check_stop_loss(
         self, symbol: str, price: float, config: RiskConfig,
     ) -> str | None:
-        """Return 'stop_loss' or 'take_profit' if threshold breached, else None."""
+        """Return 'stop_loss', 'take_profit', or 'trailing_stop' if threshold breached."""
         pos = self._pos(symbol)
         if pos.qty <= 0 or pos.entry_price <= 0:
             return None
         pnl_pct = (price - pos.entry_price) / pos.entry_price * 100
         if pnl_pct <= -config.stop_loss_pct:
             return "stop_loss"
-        if pnl_pct >= config.take_profit_pct:
+        if config.take_profit_pct > 0 and pnl_pct >= config.take_profit_pct:
             return "take_profit"
+        # Trailing stop: sell when price drops X% from peak
+        if config.trailing_stop_pct > 0 and pos.high_watermark > 0:
+            drop_from_peak = (pos.high_watermark - price) / pos.high_watermark * 100
+            if drop_from_peak >= config.trailing_stop_pct:
+                return "trailing_stop"
         return None
 
     def can_buy(self, prices: dict[str, float], config: RiskConfig) -> bool:

@@ -76,3 +76,10 @@ def fetch_ohlcv_paginated(
     df = pd.DataFrame(deduped, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
+
+
+def fetch_ticker_price(symbol: str = "BTC/USDT") -> float:
+    """Fetch current price via ticker API (faster than OHLCV)."""
+    exchange = ccxt.binance()
+    ticker = exchange.fetch_ticker(symbol)
+    return float(ticker["last"])

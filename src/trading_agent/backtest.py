@@ -16,6 +16,8 @@ from trading_agent.strategy import (
     compute_indicators,
     rsi_signal,
     composite_signal,
+    bb_volume_signal,
+    bb_rsi_signal,
     sentiment_multiplier,
     SignalFilter,
     DEFAULT_BUY_COOLDOWN,
@@ -131,9 +133,19 @@ def signal_rsi_macd(row: pd.Series, prev_row: pd.Series | None) -> str:
     return composite_signal(row["rsi"], row["macd_diff"], prev_row["macd_diff"])
 
 
+def signal_bb_volume(row: pd.Series, prev_row: pd.Series | None) -> str:
+    return bb_volume_signal(row, prev_row)
+
+
+def signal_bb_rsi(row: pd.Series, prev_row: pd.Series | None) -> str:
+    return bb_rsi_signal(row, prev_row)
+
+
 STRATEGIES: dict[str, Callable] = {
     "rsi": signal_rsi_only,
     "rsi+macd": signal_rsi_macd,
+    "bb+vol": signal_bb_volume,
+    "bb+rsi+vol": signal_bb_rsi,
 }
 
 

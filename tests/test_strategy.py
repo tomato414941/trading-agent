@@ -1,9 +1,12 @@
+import pandas as pd
 import pytest
 from trading_agent.strategy import (
     rsi_signal,
     composite_signal,
     sentiment_weighted_signal,
     sentiment_multiplier,
+    bb_volume_signal,
+    bb_rsi_signal,
     SignalFilter,
 )
 
@@ -96,3 +99,60 @@ class TestSignalFilter:
         sf = SignalFilter(buy_cooldown=12)
         sf.ticks_since_buy = 5
         assert sf.ticks_since_buy == 5
+
+
+class TestBBVolumeSignal:
+    def _make_row(self, close, bb_lower, bb_upper, vol_ratio):
+        return pd.Series({
+            "close": close,
+            "bb_lower": bb_lower,
+            "bb_upper": bb_upper,
+            "vol_ratio": vol_ratio,
+        })
+
+    def test_buy_at_lower_bb_with_volume(self):
+        row = self._make_row(close=95, bb_lower=96, bb_upper=104, vol_ratio=2.0)
+        assert bb_volume_signal(row, None) == "buy"
+
+    def test_sell_at_upper_bb_with_volume(self):
+        row = self._make_row(close=105, bb_lower=96, bb_upper=104, vol_ratio=2.0)
+        assert bb_volume_signal(row, None) == "sell"
+
+    def test_hold_no_volume_spike(self):
+        row = self._make_row(close=95, bb_lower=96, bb_upper=104, vol_ratio=1.0)
+        assert bb_volume_signal(row, None) == "hold"
+
+    def test_hold_in_middle(self):
+        row = self._make_row(close=100, bb_lower=96, bb_upper=104, vol_ratio=2.0)
+        assert bb_volume_signal(row, None) == "hold"
+
+    def test_hold_on_nan(self):
+        row = self._make_row(close=95, bb_lower=float("nan"), bb_upper=104, vol_ratio=2.0)
+        assert bb_volume_signal(row, None) == "hold"
+
+
+class TestBBRsiSignal:
+    def _make_row(self, close, bb_lower, bb_upper, rsi, vol_ratio):
+        return pd.Series({
+            "close": close,
+            "bb_lower": bb_lower,
+            "bb_upper": bb_upper,
+            "rsi": rsi,
+            "vol_ratio": vol_ratio,
+        })
+
+    def test_buy_all_conditions(self):
+        row = self._make_row(close=95, bb_lower=96, bb_upper=104, rsi=35, vol_ratio=2.0)
+        assert bb_rsi_signal(row, None) == "buy"
+
+    def test_sell_all_conditions(self):
+        row = self._make_row(close=105, bb_lower=96, bb_upper=104, rsi=65, vol_ratio=2.0)
+        assert bb_rsi_signal(row, None) == "sell"
+
+    def test_hold_rsi_not_low_enough(self):
+        row = self._make_row(close=95, bb_lower=96, bb_upper=104, rsi=45, vol_ratio=2.0)
+        assert bb_rsi_signal(row, None) == "hold"
+
+    def test_hold_no_volume(self):
+        row = self._make_row(close=95, bb_lower=96, bb_upper=104, rsi=35, vol_ratio=1.0)
+        assert bb_rsi_signal(row, None) == "hold"

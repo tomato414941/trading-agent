@@ -1,14 +1,18 @@
-"""Signal generation with RSI, MACD, and cooldown."""
+"""Signal generation with RSI, MACD, BB, Volume, and cooldown."""
 
 from __future__ import annotations
 
 import pandas as pd
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
+from ta.volatility import BollingerBands
 
 # RSI thresholds
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
+
+# Volume spike: current volume > X * rolling average
+VOLUME_SPIKE_MULTIPLIER = 1.5
 
 # Default cooldown: skip N candles after a buy before allowing another buy
 DEFAULT_BUY_COOLDOWN = 12
@@ -21,6 +25,18 @@ def compute_indicators(df: pd.DataFrame, rsi_window: int = 14) -> pd.DataFrame:
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
     df["macd_diff"] = macd.macd_diff()  # histogram: macd - signal
+
+    # Bollinger Bands (20-period, 2 std dev)
+    bb = BollingerBands(close=df["close"], window=20, window_dev=2)
+    df["bb_upper"] = bb.bollinger_hband()
+    df["bb_lower"] = bb.bollinger_lband()
+    df["bb_mid"] = bb.bollinger_mavg()
+    df["bb_width"] = bb.bollinger_wband()
+
+    # Volume metrics
+    df["vol_sma"] = df["volume"].rolling(window=20).mean()
+    df["vol_ratio"] = df["volume"] / df["vol_sma"]
+
     return df
 
 
@@ -132,6 +148,59 @@ class SignalFilter:
             return "sell"
 
         return "hold"
+
+
+def bb_volume_signal(
+    row: pd.Series,
+    prev_row: pd.Series | None,
+) -> str:
+    """Bollinger Band breakout + volume spike.
+
+    Buy:  price touches/crosses lower BB AND volume spike (vol_ratio > 1.5)
+    Sell: price touches/crosses upper BB AND volume spike
+    """
+    close = row.get("close")
+    bb_lower = row.get("bb_lower")
+    bb_upper = row.get("bb_upper")
+    vol_ratio = row.get("vol_ratio")
+
+    if any(pd.isna(v) for v in [close, bb_lower, bb_upper, vol_ratio]):
+        return "hold"
+
+    is_volume_spike = vol_ratio >= VOLUME_SPIKE_MULTIPLIER
+
+    if close <= bb_lower and is_volume_spike:
+        return "buy"
+    if close >= bb_upper and is_volume_spike:
+        return "sell"
+    return "hold"
+
+
+def bb_rsi_signal(
+    row: pd.Series,
+    prev_row: pd.Series | None,
+) -> str:
+    """Combined BB + RSI + Volume: require BB touch + RSI confirmation + volume.
+
+    Buy:  price <= lower BB AND RSI < 40 AND volume spike
+    Sell: price >= upper BB AND RSI > 60 AND volume spike
+    """
+    close = row.get("close")
+    bb_lower = row.get("bb_lower")
+    bb_upper = row.get("bb_upper")
+    rsi = row.get("rsi")
+    vol_ratio = row.get("vol_ratio")
+
+    if any(pd.isna(v) for v in [close, bb_lower, bb_upper, rsi, vol_ratio]):
+        return "hold"
+
+    is_volume_spike = vol_ratio >= VOLUME_SPIKE_MULTIPLIER
+
+    if close <= bb_lower and rsi < 40 and is_volume_spike:
+        return "buy"
+    if close >= bb_upper and rsi > 60 and is_volume_spike:
+        return "sell"
+    return "hold"
 
 
 def generate_signal(df: pd.DataFrame) -> str:

@@ -160,16 +160,11 @@ def fetch_funding_rate_history(
 _BG_BASE = "https://bitcoin-data.com/api/v1"
 _BG_CACHE_DIR = Path("data/onchain_cache")
 
-# Metrics we care about for trading signals (Tier S + A from research)
+# Core 3 metrics used by onchain_signal() — fits BGeometrics Free (8 req/h, 15/day)
 ONCHAIN_METRICS = {
     "sth_sopr": "sth-sopr",
-    "exchange_netflow": "exchange-netflow",
     "sth_mvrv": "sth-mvrv",
-    "lth_position_change": "lth-net-position-change-30d",
-    "mvrv_zscore": "mvrv-zscore",
-    "nupl": "nupl",
-    "puell_multiple": "puell-multiple",
-    "active_addresses": "active-addresses",
+    "exchange_netflow": "exchange-netflow",
 }
 
 

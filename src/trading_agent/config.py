@@ -35,6 +35,10 @@ class ArbitrageConfig:
     futures_fee_rate: float = 0.0005    # 0.05% per futures trade
     position_fraction: float = 0.3      # fraction of capital per position
     futures_leverage: float = 1.0       # 1x = fully collateralized (no liquidation risk)
+    # Live execution settings
+    testnet: bool = True               # use Binance testnet
+    check_interval_sec: int = 300      # check every 5 minutes
+    symbol: str = "BTC/USDT"           # target symbol
 
 
 DEFAULT_RISK = RiskConfig()

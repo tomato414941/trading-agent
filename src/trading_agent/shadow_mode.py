@@ -42,6 +42,9 @@ class ShadowRunner:
         self._performance = PerformanceTracker.load()
 
         self._prev_prices: dict[str, float] = {}
+        self._prev_features: dict[str, dict[str, float]] = {}
+        self._prev_predictions: dict[str, object] = {}
+        self._entry_prices: dict[str, float] = {}
         self._stop = False
 
     def tick(self) -> dict:
@@ -82,23 +85,25 @@ class ShadowRunner:
         all_signals = {**ohlcv_signals, **sn_values}
         features = self._feature_engine.compute(all_signals)
 
-        # Delayed learning: teach model about the outcome of previous prediction
+        # Delayed learning: teach model using THIS symbol's previous features
         prev_price = self._prev_prices.get(symbol)
-        if prev_price is not None:
+        prev_features = self._prev_features.get(symbol)
+        if prev_price is not None and prev_features is not None:
             target = self._feature_engine.compute_target(prev_price, current_price)
-            self._learner.learn_delayed(target)
+            self._learner.learn(prev_features, target)
 
             # Update accuracy tracking
-            last_pred = getattr(self, "_last_prediction", None)
+            last_pred = self._prev_predictions.get(symbol)
             if last_pred is not None:
                 self._learner.update_accuracy(last_pred.direction, target)
                 self._learner.update_calibration(last_pred.confidence, target)
 
         self._prev_prices[symbol] = current_price
+        self._prev_features[symbol] = features
 
         # Predict
         prediction = self._learner.predict(features)
-        self._last_prediction = prediction
+        self._prev_predictions[symbol] = prediction
 
         action = {"price": current_price, "signal": "hold", "features_count": len(features)}
 
@@ -135,20 +140,23 @@ class ShadowRunner:
             amount = self._engine.cash * kelly
             order = self._engine.market_buy(symbol, amount)
             if order:
+                self._entry_prices[symbol] = order.price
                 action["signal"] = "buy"
                 action["qty"] = order.qty
                 action["kelly"] = kelly
                 self._performance.record_trade(0, prediction.calibrated_confidence)
         elif prediction.direction == 0 and self._engine.positions.get(symbol, 0) > 0:
             qty = self._engine.positions[symbol]
-            entry_price = current_price  # simplified
+            entry_price = self._entry_prices.get(symbol, current_price)
             order = self._engine.market_sell(symbol, qty)
             if order:
                 pnl = order.qty * (order.price - entry_price)
                 action["signal"] = "sell"
                 action["qty"] = order.qty
+                action["pnl"] = pnl
                 self._breaker.record_trade(pnl)
                 self._performance.record_trade(pnl, prediction.calibrated_confidence)
+                self._entry_prices.pop(symbol, None)
 
         return action
 
@@ -229,6 +237,7 @@ class ShadowRunner:
             log.info("Warmup %s: got %d candles, training...", symbol, len(df))
 
             prev_price = None
+            prev_features: dict[str, float] | None = None
             for i in range(len(df)):
                 row = df.iloc[i]
                 price = float(row["close"])
@@ -252,11 +261,13 @@ class ShadowRunner:
                 all_signals = {**ohlcv_signals, **sn_values}
                 features = self._feature_engine.compute(all_signals)
 
-                if prev_price is not None and features:
+                # Learn PREVIOUS features with current target (no lookahead)
+                if prev_price is not None and prev_features:
                     target = self._feature_engine.compute_target(prev_price, price)
-                    self._learner.learn(features, target)
+                    self._learner.learn(prev_features, target)
 
                 prev_price = price
+                prev_features = features
 
             log.info(
                 "Warmup %s done: %d samples, warm=%s",

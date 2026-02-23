@@ -266,3 +266,64 @@ class TestPerformanceTracker:
         tracker = PerformanceTracker()
         s = tracker.summary()
         assert "Performance Summary" in s
+
+
+# ---------------------------------------------------------------------------
+# Shadow Mode - Bug Fixes
+# ---------------------------------------------------------------------------
+
+class TestShadowModeBugFixes:
+    """Verify critical bug fixes in shadow mode."""
+
+    def test_per_symbol_learning_state(self):
+        """Bug 1: Each symbol should have its own learning state."""
+        from trading_agent.shadow_mode import ShadowRunner
+        runner = ShadowRunner()
+        # Verify per-symbol dicts exist
+        assert isinstance(runner._prev_features, dict)
+        assert isinstance(runner._prev_predictions, dict)
+        assert isinstance(runner._entry_prices, dict)
+
+    def test_entry_price_tracking(self):
+        """Bug 3: Entry price should be tracked for correct PnL."""
+        from trading_agent.order_engine import PaperOrderEngine
+        engine = PaperOrderEngine(initial_cash=10000.0, slippage_bps=0.0)
+        engine.set_price("BTC/USDT", 50000.0)
+
+        # Buy
+        order = engine.market_buy("BTC/USDT", 1000.0)
+        entry_price = order.price  # should be ~50000
+
+        # Price goes up
+        engine.set_price("BTC/USDT", 55000.0)
+        qty = engine.positions["BTC/USDT"]
+        sell_order = engine.market_sell("BTC/USDT", qty)
+
+        # PnL should reflect actual price change, not be ~0
+        pnl = sell_order.qty * (sell_order.price - entry_price)
+        assert pnl > 0  # price went up from 50k to 55k
+        assert pnl == pytest.approx(qty * 5000.0, rel=0.01)
+
+    def test_warmup_no_lookahead(self):
+        """Bug 2: Warmup should learn prev features with current target."""
+        from trading_agent.feature_engine import CryptoFeatureEngine, FeatureConfig
+        from trading_agent.ml_strategy import CryptoOnlineLearner, MLConfig
+
+        engine = CryptoFeatureEngine(FeatureConfig(zscore_window=3))
+        learner = CryptoOnlineLearner(MLConfig(grace_period=2))
+
+        # Simulate warmup loop with correct alignment
+        prices = [100.0, 101.0, 102.0, 100.5]
+        prev_price = None
+        prev_features = None
+        for price in prices:
+            features = engine.compute({"x": price})
+            if prev_price is not None and prev_features:
+                target = engine.compute_target(prev_price, price)
+                learner.learn(prev_features, target)
+            prev_price = price
+            prev_features = features
+
+        # 4 prices → 3 learning events (first has no prev_price/prev_features)
+        # Each learns PREVIOUS features with CURRENT target (no lookahead)
+        assert learner.samples_seen == 3

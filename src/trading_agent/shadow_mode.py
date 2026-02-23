@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from trading_agent.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from trading_agent.config import AgentConfig, RiskConfig
 from trading_agent.feature_engine import CryptoFeatureEngine, FeatureConfig
-from trading_agent.fetcher import fetch_ohlcv
+from trading_agent.fetcher import fetch_ohlcv, fetch_ohlcv_paginated
 from trading_agent.ml_strategy import CryptoOnlineLearner, MLConfig
 from trading_agent.order_engine import PaperOrderEngine
 from trading_agent.performance import PerformanceTracker
@@ -206,6 +206,69 @@ class ShadowRunner:
         log.info("Graduation check: %s (%s)", "READY" if can else "NOT READY", reason)
         print(self._performance.summary())
 
+    def warmup(self, candles: int = 200) -> None:
+        """Pre-warm model using historical OHLCV + signal-noise data."""
+        from trading_agent.signal_noise_client import CRYPTO_SIGNALS
+
+        log.info("Warmup: fetching %d candles per symbol...", candles)
+
+        # Fetch historical signal-noise data (daily resolution)
+        sn_history: dict[str, list[tuple[str, float]]] = {}
+        for name in CRYPTO_SIGNALS:
+            rows = self._signal_client.get_data(name)
+            if rows:
+                sn_history[name] = [
+                    (r["timestamp"], float(r["value"])) for r in rows if r.get("value") is not None
+                ]
+
+        for symbol in self._agent_config.symbols:
+            prefix = symbol.split("/")[0].lower()
+            log.info("Warmup %s: fetching OHLCV...", symbol)
+            df = fetch_ohlcv_paginated(symbol, self._agent_config.signal_timeframe, total=candles)
+            df = compute_indicators(df)
+            log.info("Warmup %s: got %d candles, training...", symbol, len(df))
+
+            prev_price = None
+            for i in range(len(df)):
+                row = df.iloc[i]
+                price = float(row["close"])
+                ts = str(row["timestamp"])
+
+                ohlcv_signals = {
+                    f"{prefix}_close": price,
+                    f"{prefix}_rsi": float(row.get("rsi", 50)),
+                    f"{prefix}_macd_diff": float(row.get("macd_diff", 0)),
+                    f"{prefix}_vol_ratio": float(row.get("vol_ratio", 1)),
+                }
+
+                # Find closest signal-noise values for this timestamp
+                sn_values = {}
+                for name, hist in sn_history.items():
+                    for j in range(len(hist) - 1, -1, -1):
+                        if hist[j][0] <= ts:
+                            sn_values[name] = hist[j][1]
+                            break
+
+                all_signals = {**ohlcv_signals, **sn_values}
+                features = self._feature_engine.compute(all_signals)
+
+                if prev_price is not None and features:
+                    target = self._feature_engine.compute_target(prev_price, price)
+                    self._learner.learn(features, target)
+
+                prev_price = price
+
+            log.info(
+                "Warmup %s done: %d samples, warm=%s",
+                symbol, self._learner.samples_seen, self._learner.is_warm,
+            )
+
+        self._learner.save()
+        log.info(
+            "Warmup complete: %d total samples, accuracy tracking starts on live ticks",
+            self._learner.samples_seen,
+        )
+
 
 if __name__ == "__main__":
     import sys
@@ -216,7 +279,15 @@ if __name__ == "__main__":
         if a == "--interval" and i + 1 < len(sys.argv):
             interval = int(sys.argv[i + 1])
 
-    if "--once" in sys.argv:
+    if "--warmup" in sys.argv:
+        candles = 200
+        for i, a in enumerate(sys.argv):
+            if a == "--candles" and i + 1 < len(sys.argv):
+                candles = int(sys.argv[i + 1])
+        runner = ShadowRunner()
+        runner.warmup(candles=candles)
+        print(f"Model warmed up: {runner._learner.samples_seen} samples")
+    elif "--once" in sys.argv:
         runner = ShadowRunner()
         result = runner.tick()
         for a in result["actions"]:

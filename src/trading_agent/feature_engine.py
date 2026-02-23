@@ -23,12 +23,14 @@ class FeatureConfig:
             ("btc_close", "gold", "btc_gold"),
             ("btc_close", "sp500", "btc_sp500"),
             ("tsy_yield_10y", "tsy_yield_2y", "yield_curve"),
+            ("binance_btc_oi", "btc_close", "oi_price"),
         ]
     )
     momentum_pairs: list[tuple[str, str, str]] = field(
         default_factory=lambda: [
             ("btc_close", "sp500", "btc_vs_sp500"),
             ("btc_close", "dxy", "btc_vs_dxy"),
+            ("binance_btc_oi", "btc_close", "oi_vs_price"),
         ]
     )
 

@@ -17,9 +17,12 @@ CRYPTO_SIGNALS = [
     "fear_greed",
     "binance_btc_oi",
     "deribit_btc_skew",
+    "bitfinex_btc_ls_ratio",
+    "cg_btc_dominance",
     # On-chain
     "mempool_fee",
-    "mempool_size",
+    "bc_tx_fees_usd",
+    "btc_active_addresses",
     # Macro
     "dxy",
     "gold",

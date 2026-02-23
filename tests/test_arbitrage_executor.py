@@ -1,6 +1,7 @@
 """Tests for live arbitrage executor (with mocked exchange)."""
 
-from unittest.mock import MagicMock
+import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -10,6 +11,7 @@ from trading_agent.arbitrage_executor import (
     close_position,
     open_position,
     _futures_symbol,
+    _next_settlement_time,
 )
 from trading_agent.config import ArbitrageConfig
 
@@ -135,13 +137,36 @@ class TestCheckAndAct:
         assert state.is_open is False
         ex_spot.create_market_buy_order.assert_not_called()
 
-    def test_position_collects_fr(self, mock_exchanges, config):
-        """With open position, records FR payment."""
+    def test_position_no_fr_between_settlements(self, mock_exchanges, config):
+        """FR should NOT accumulate between settlement times."""
         ex_futures, ex_spot = mock_exchanges
         ex_futures.fetch_funding_rate.return_value = {"fundingRate": 0.0005}
+        # next_settlement is far in the future -> no FR accrual
+        future_ms = int(time.time() * 1000) + 3600_000
         state = LiveArbitrageState(
             is_open=True, symbol="BTC/USDT",
             spot_qty=0.01, spot_entry_price=50000.0,
+            futures_qty=0.01,
+            next_settlement_ms=future_ms,
+        )
+
+        action = check_and_act(ex_futures, ex_spot, state, config)
+
+        assert "holding" in action
+        assert state.accumulated_fr == 0.0
+        assert state.total_fr_collected == 0.0
+
+    def test_position_collects_fr_at_settlement(self, mock_exchanges, config):
+        """FR accrues only when settlement time has passed."""
+        ex_futures, ex_spot = mock_exchanges
+        ex_futures.fetch_funding_rate.return_value = {"fundingRate": 0.0005}
+        # next_settlement is in the past -> should accrue FR
+        past_ms = int(time.time() * 1000) - 1000
+        state = LiveArbitrageState(
+            is_open=True, symbol="BTC/USDT",
+            spot_qty=0.01, spot_entry_price=50000.0,
+            futures_qty=0.01,
+            next_settlement_ms=past_ms,
         )
 
         action = check_and_act(ex_futures, ex_spot, state, config)
@@ -150,15 +175,19 @@ class TestCheckAndAct:
         # FR payment = 0.01 * 50000 * 0.0005 = 0.25
         assert state.accumulated_fr == pytest.approx(0.25)
         assert state.total_fr_collected == pytest.approx(0.25)
+        assert state.next_settlement_ms > past_ms
 
     def test_exit_on_consecutive_low_fr(self, mock_exchanges, config):
         """N consecutive low FR -> closes position."""
         ex_futures, ex_spot = mock_exchanges
         ex_futures.fetch_funding_rate.return_value = {"fundingRate": 0.00005}
+        future_ms = int(time.time() * 1000) + 3600_000
         state = LiveArbitrageState(
             is_open=True, symbol="BTC/USDT",
             spot_qty=0.01, spot_entry_price=50000.0,
+            futures_qty=0.01,
             low_fr_count=2,  # already 2, this tick makes 3
+            next_settlement_ms=future_ms,
         )
 
         action = check_and_act(ex_futures, ex_spot, state, config)
@@ -171,10 +200,13 @@ class TestCheckAndAct:
         """Low FR count resets when FR goes above threshold."""
         ex_futures, ex_spot = mock_exchanges
         ex_futures.fetch_funding_rate.return_value = {"fundingRate": 0.0005}
+        future_ms = int(time.time() * 1000) + 3600_000
         state = LiveArbitrageState(
             is_open=True, symbol="BTC/USDT",
             spot_qty=0.01, spot_entry_price=50000.0,
+            futures_qty=0.01,
             low_fr_count=2,
+            next_settlement_ms=future_ms,
         )
 
         check_and_act(ex_futures, ex_spot, state, config)
@@ -234,3 +266,47 @@ class TestOpenClosePosition:
 
         assert state.num_round_trips == 0
         ex_spot.create_market_sell_order.assert_not_called()
+
+    def test_open_rollback_on_futures_failure(self, mock_exchanges, config):
+        """Futures short fails -> spot buy is rolled back."""
+        ex_futures, ex_spot = mock_exchanges
+        ex_futures.create_market_sell_order.side_effect = Exception("network error")
+        state = LiveArbitrageState()
+
+        open_position(ex_futures, ex_spot, state, "BTC/USDT", 3000.0, config)
+
+        assert state.is_open is False
+        # Spot buy happened, then rollback sell
+        ex_spot.create_market_buy_order.assert_called_once()
+        ex_spot.create_market_sell_order.assert_called_once()
+
+    def test_open_aborts_on_spot_failure(self, mock_exchanges, config):
+        """Spot buy fails -> no futures order, no position."""
+        ex_futures, ex_spot = mock_exchanges
+        ex_spot.create_market_buy_order.side_effect = Exception("insufficient funds")
+        state = LiveArbitrageState()
+
+        open_position(ex_futures, ex_spot, state, "BTC/USDT", 3000.0, config)
+
+        assert state.is_open is False
+        ex_futures.create_market_sell_order.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Settlement time helper
+# ---------------------------------------------------------------------------
+
+class TestNextSettlementTime:
+    def test_returns_future_timestamp(self):
+        now_ms = int(time.time() * 1000)
+        next_ms = _next_settlement_time(now_ms)
+        assert next_ms > now_ms
+
+    def test_returns_valid_hour(self):
+        from datetime import datetime, timezone
+        now_ms = int(time.time() * 1000)
+        next_ms = _next_settlement_time(now_ms)
+        dt = datetime.fromtimestamp(next_ms / 1000, tz=timezone.utc)
+        assert dt.hour in (0, 8, 16)
+        assert dt.minute == 0
+        assert dt.second == 0

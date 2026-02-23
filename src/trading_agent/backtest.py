@@ -86,6 +86,9 @@ class WalkForwardResult:
         return "\n".join(lines)
 
 
+MIN_TRADES_FOR_SIGNIFICANCE = 10
+
+
 @dataclass
 class BacktestResult:
     strategy_name: str
@@ -103,6 +106,12 @@ class BacktestResult:
     period_start: str = ""
     period_end: str = ""
     trades: list[dict] = field(default_factory=list)
+    t_stat: float = 0.0
+    p_value: float = 1.0
+
+    @property
+    def is_significant(self) -> bool:
+        return self.num_trades >= MIN_TRADES_FOR_SIGNIFICANCE and self.p_value < 0.05
 
     def summary(self) -> str:
         low_sample = " (low sample)" if self.num_trades < 3 else ""
@@ -122,6 +131,9 @@ class BacktestResult:
             lines.append(f"Stop Loss:       {self.stop_loss_count}")
             lines.append(f"Take Profit:     {self.take_profit_count}")
             lines.append(f"Trailing Stop:   {self.trailing_stop_count}")
+        if self.num_trades >= MIN_TRADES_FOR_SIGNIFICANCE:
+            sig = "YES" if self.p_value < 0.05 else "NO"
+            lines.append(f"t-stat:          {self.t_stat:.2f} (p={self.p_value:.4f}, sig={sig})")
         return "\n".join(lines)
 
 
@@ -270,6 +282,8 @@ def run_backtest(
     regime_timeframe: str = "4h",
     df: pd.DataFrame | None = None,
     funding_df: pd.DataFrame | None = None,
+    slippage_bps: float = 0.0,
+    spread_bps: float = 0.0,
 ) -> BacktestResult:
     if df is None:
         df = fetch_ohlcv(symbol, timeframe, limit)
@@ -349,6 +363,12 @@ def run_backtest(
         # Execute pending signal from previous candle at this candle's open
         if pending_signal is not None and i > 0:
             exec_price = row["open"]
+            # Apply slippage + spread: buy at ask (higher), sell at bid (lower)
+            cost_bps = (slippage_bps + spread_bps / 2) / 10_000
+            if pending_signal == "buy":
+                exec_price *= (1 + cost_bps)
+            elif pending_signal == "sell":
+                exec_price *= (1 - cost_bps)
 
             if pending_signal == "buy" and cash > 1.0:
                 # Max exposure check
@@ -448,6 +468,17 @@ def run_backtest(
     else:
         sharpe_ratio = 0.0
 
+    # Statistical significance of trade PnL
+    t_stat_val = 0.0
+    p_value_val = 1.0
+    trade_pnls = [t["pnl"] for t in sell_trades if t.get("pnl") is not None]
+    if len(trade_pnls) >= 2:
+        from scipy import stats
+        t_stat_val, p_value_val = stats.ttest_1samp(trade_pnls, 0)
+        if pd.isna(t_stat_val):
+            t_stat_val = 0.0
+            p_value_val = 1.0
+
     return BacktestResult(
         strategy_name=strategy,
         initial_cash=initial_cash,
@@ -464,6 +495,8 @@ def run_backtest(
         period_start=period_start,
         period_end=period_end,
         trades=trades,
+        t_stat=t_stat_val,
+        p_value=p_value_val,
     )
 
 
@@ -498,6 +531,8 @@ def parameter_sweep(
     regime_filter: bool = False,
     regime_timeframe: str = "4h",
     df: pd.DataFrame | None = None,
+    slippage_bps: float = 5.0,
+    spread_bps: float = 2.0,
 ) -> list[BacktestResult]:
     if rsi_windows is None:
         rsi_windows = [10, 14, 20]
@@ -530,6 +565,8 @@ def parameter_sweep(
             regime_filter=regime_filter,
             regime_timeframe=regime_timeframe,
             df=df_ind,
+            slippage_bps=slippage_bps,
+            spread_bps=spread_bps,
         )
         r.strategy_name = f"rsi{rsi_w}_cd{cd}_sl{sl}_tp{tp}_ts{ts}"
         results.append(r)
@@ -537,7 +574,11 @@ def parameter_sweep(
         if idx % 20 == 0 or idx == total:
             print(f"  sweep: {idx}/{total} done")
 
-    results.sort(key=lambda r: r.total_return_pct, reverse=True)
+    # Sort significant results first, then by return
+    results.sort(
+        key=lambda r: (r.num_trades >= MIN_TRADES_FOR_SIGNIFICANCE, r.total_return_pct),
+        reverse=True,
+    )
     return results
 
 
@@ -568,6 +609,8 @@ def walk_forward_validation(
     regime_filter: bool = False,
     regime_timeframe: str = "4h",
     df: pd.DataFrame | None = None,
+    slippage_bps: float = 5.0,
+    spread_bps: float = 2.0,
 ) -> WalkForwardResult:
     """Walk-forward validation: optimize on train, evaluate on test, roll forward.
 
@@ -600,6 +643,8 @@ def walk_forward_validation(
             regime_filter=regime_filter,
             regime_timeframe=regime_timeframe,
             df=train_df,
+            slippage_bps=slippage_bps,
+            spread_bps=spread_bps,
         )
 
         best = sweep_results[0]
@@ -621,6 +666,8 @@ def walk_forward_validation(
             regime_filter=regime_filter,
             regime_timeframe=regime_timeframe,
             df=test_df_ind,
+            slippage_bps=slippage_bps,
+            spread_bps=spread_bps,
         )
 
         wf_window = WalkForwardWindow(

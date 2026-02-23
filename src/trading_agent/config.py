@@ -7,11 +7,11 @@ from dataclasses import dataclass, field
 
 @dataclass
 class RiskConfig:
-    stop_loss_pct: float = 5.0
-    take_profit_pct: float = 15.0
-    trailing_stop_pct: float = 0.0  # 0 = disabled; X = sell when price drops X% from peak
-    max_exposure_pct: float = 60.0
-    buy_fraction: float = 0.1
+    stop_loss_pct: float = 3.0
+    take_profit_pct: float = 8.0
+    trailing_stop_pct: float = 3.0
+    max_exposure_pct: float = 40.0
+    buy_fraction: float = 0.05
 
 
 @dataclass
@@ -41,6 +41,13 @@ class ArbitrageConfig:
     symbol: str = "BTC/USDT"           # target symbol
 
 
+@dataclass
+class BacktestConfig:
+    slippage_bps: float = 5.0    # basis points per trade (price impact)
+    spread_bps: float = 2.0      # bid-ask spread in basis points
+
+
 DEFAULT_RISK = RiskConfig()
 DEFAULT_AGENT = AgentConfig()
 DEFAULT_ARBITRAGE = ArbitrageConfig()
+DEFAULT_BACKTEST = BacktestConfig()

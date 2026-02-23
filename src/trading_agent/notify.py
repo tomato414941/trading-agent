@@ -118,3 +118,30 @@ def notify_agent_status(status: str, details: str = "") -> None:
         details or f"Trading agent {status}",
         color_key=color,
     )
+
+
+def notify_circuit_breaker(reason: str) -> None:
+    send(
+        "CIRCUIT BREAKER",
+        f"Trading halted: {reason}",
+        color_key="error",
+    )
+
+
+def notify_daily_report(metrics) -> None:
+    from trading_agent.performance import DailyMetrics
+    if not isinstance(metrics, DailyMetrics):
+        return
+    fields = [
+        {"name": "PnL", "value": f"${metrics.pnl:+,.2f} ({metrics.pnl_pct:+.2f}%)", "inline": True},
+        {"name": "Trades", "value": f"{metrics.num_trades} (WR {metrics.win_rate:.0f}%)", "inline": True},
+        {"name": "Max DD", "value": f"{metrics.max_drawdown_pct:.1f}%", "inline": True},
+    ]
+    if metrics.model_accuracy > 0:
+        fields.append({"name": "Model", "value": f"acc={metrics.model_accuracy:.1f}% ({metrics.model_samples} samples)", "inline": True})
+    send(
+        f"Daily Report — {metrics.date}",
+        f"Equity: ${metrics.equity:,.2f}",
+        color_key="info",
+        fields=fields,
+    )

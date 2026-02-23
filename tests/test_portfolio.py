@@ -83,7 +83,7 @@ class TestStopLoss:
     def test_stop_loss_not_triggered(self):
         p = Portfolio(cash=10000.0)
         p.buy("BTC/USDT", 50000.0)
-        cfg = RiskConfig(stop_loss_pct=5.0)
+        cfg = RiskConfig(stop_loss_pct=5.0, trailing_stop_pct=0.0)
         # Price dropped only 3%
         assert p.check_stop_loss("BTC/USDT", 48500.0, cfg) is None
 
@@ -97,7 +97,7 @@ class TestStopLoss:
     def test_take_profit_not_triggered(self):
         p = Portfolio(cash=10000.0)
         p.buy("BTC/USDT", 50000.0)
-        cfg = RiskConfig(take_profit_pct=15.0)
+        cfg = RiskConfig(take_profit_pct=15.0, trailing_stop_pct=0.0)
         # Price rose 10%
         assert p.check_stop_loss("BTC/USDT", 55000.0, cfg) is None
 
@@ -111,7 +111,7 @@ class TestTrailingStop:
         pos = p.get_position("BTC/USDT")
         assert pos.high_watermark == 60000.0
         # Drop from 60k to 54k = 10% from peak
-        cfg = RiskConfig(stop_loss_pct=20.0, trailing_stop_pct=10.0)
+        cfg = RiskConfig(stop_loss_pct=20.0, take_profit_pct=50.0, trailing_stop_pct=10.0)
         assert p.check_stop_loss("BTC/USDT", 54000.0, cfg) == "trailing_stop"
 
     def test_trailing_stop_not_triggered(self):

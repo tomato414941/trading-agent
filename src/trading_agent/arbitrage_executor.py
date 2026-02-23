@@ -13,7 +13,7 @@ import logging
 import signal
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import ccxt
@@ -43,6 +43,8 @@ class LiveArbitrageState:
     accumulated_fr: float = 0.0
     entry_time: str = ""
     low_fr_count: int = 0
+    next_settlement_ms: int = 0
+    last_settlement_fr: float = 0.0
     # Lifetime stats
     total_fr_collected: float = 0.0
     total_fees_paid: float = 0.0
@@ -80,6 +82,20 @@ class LiveArbitrageState:
 # ---------------------------------------------------------------------------
 # Core execution functions
 # ---------------------------------------------------------------------------
+
+def _next_settlement_time(now_ms: int) -> int:
+    """Return ms timestamp of next FR settlement (00:00/08:00/16:00 UTC)."""
+    now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+    for h in (0, 8, 16):
+        s = now.replace(hour=h, minute=0, second=0, microsecond=0)
+        if s > now:
+            return int(s.timestamp() * 1000)
+    # Next day 00:00 UTC
+    tomorrow = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return int(tomorrow.timestamp() * 1000)
+
 
 def _futures_symbol(symbol: str) -> str:
     """Convert spot symbol to futures: BTC/USDT -> BTC/USDT:USDT."""
@@ -126,11 +142,31 @@ def open_position(
     except Exception as e:
         log.warning("set_leverage failed (may already be set): %s", e)
 
-    # Execute both legs
+    # Execute both legs with rollback on partial failure
     log.info("Opening position: spot buy %.6f + futures short %.6f %s", qty, qty, symbol)
 
-    spot_order = ex_spot.create_market_buy_order(symbol, qty)
-    futures_order = ex_futures.create_market_sell_order(_futures_symbol(symbol), qty)
+    # Leg 1: Spot buy
+    try:
+        spot_order = ex_spot.create_market_buy_order(symbol, qty)
+    except Exception as e:
+        log.error("Spot buy failed, aborting: %s", e)
+        return
+
+    spot_fill_qty = float(spot_order.get("filled", qty))
+
+    # Leg 2: Futures short (match spot fill quantity)
+    try:
+        futures_order = ex_futures.create_market_sell_order(
+            _futures_symbol(symbol), spot_fill_qty
+        )
+    except Exception as e:
+        log.error("Futures short failed after spot buy! Attempting rollback...")
+        try:
+            ex_spot.create_market_sell_order(symbol, spot_fill_qty)
+            log.info("Rollback: spot sell successful, position unwound")
+        except Exception as e2:
+            log.critical("ROLLBACK FAILED: %s -- Manual intervention required!", e2)
+        return
 
     spot_price = float(spot_order.get("average", price))
     futures_price = float(futures_order.get("average", price))
@@ -147,6 +183,8 @@ def open_position(
     state.accumulated_fr = 0.0
     state.entry_time = datetime.now(timezone.utc).isoformat()
     state.low_fr_count = 0
+    state.next_settlement_ms = _next_settlement_time(int(time.time() * 1000))
+    state.last_settlement_fr = 0.0
     state.total_fees_paid += spot_fee + futures_fee
     state.save()
 
@@ -214,10 +252,16 @@ def check_and_act(
     log.info("Tick: %s price=$%.2f FR=%.6f (%.4f%%)", symbol, price, fr, fr * 100)
 
     if state.is_open:
-        # Record FR payment
-        fr_payment = state.spot_qty * price * fr
-        state.accumulated_fr += fr_payment
-        state.total_fr_collected += fr_payment
+        # Record FR only at actual settlement times (00:00/08:00/16:00 UTC)
+        now_ms = int(time.time() * 1000)
+        if state.next_settlement_ms > 0 and now_ms >= state.next_settlement_ms:
+            fr_payment = state.futures_qty * price * fr
+            state.accumulated_fr += fr_payment
+            state.total_fr_collected += fr_payment
+            state.last_settlement_fr = fr_payment
+            state.next_settlement_ms = _next_settlement_time(now_ms)
+            log.info("FR settlement: $%.4f (next=%s)", fr_payment,
+                     datetime.fromtimestamp(state.next_settlement_ms / 1000, tz=timezone.utc).isoformat())
 
         # Check exit
         if fr < config.exit_fr_threshold:
@@ -230,7 +274,7 @@ def check_and_act(
             return "closed"
 
         state.save()
-        return f"holding (FR=${fr_payment:+.4f}, low_count={state.low_fr_count})"
+        return f"holding (last_fr=${state.last_settlement_fr:+.4f}, low_count={state.low_fr_count})"
 
     elif fr > config.entry_fr_threshold:
         # Calculate position size

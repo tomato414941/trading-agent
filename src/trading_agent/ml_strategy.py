@@ -107,7 +107,11 @@ class CryptoOnlineLearner:
 
         direction = max(proba, key=proba.get)
         confidence = proba[direction]
-        calibrated = self._calibration.calibrated_probability(confidence)
+        # Calibrate using P(up) for consistent bucket meaning
+        p_up = proba.get(1, 0.0)
+        calibrated_p_up = self._calibration.calibrated_probability(p_up)
+        # Convert back to predicted direction's confidence
+        calibrated = calibrated_p_up if direction == 1 else 1 - calibrated_p_up
         self._last_features = features
         self._total_predictions += 1
 

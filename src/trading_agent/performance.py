@@ -54,8 +54,11 @@ class PerformanceTracker:
         today = date.today().isoformat()
         if self._current_day and self._current_day.date == today:
             return
+        # Finalize previous day (avoid duplicates)
         if self._current_day:
-            self._daily_metrics.append(self._current_day)
+            existing_dates = {d.date for d in self._daily_metrics}
+            if self._current_day.date not in existing_dates:
+                self._daily_metrics.append(self._current_day)
         self._current_day = DailyMetrics(date=today, equity=equity)
         if equity > self._peak_equity:
             self._peak_equity = equity
@@ -94,7 +97,9 @@ class PerformanceTracker:
             dd = (self._peak_equity - equity) / self._peak_equity * 100
             self._current_day.max_drawdown_pct = dd
 
-        self._daily_metrics.append(self._current_day)
+        existing_dates = {d.date for d in self._daily_metrics}
+        if self._current_day.date not in existing_dates:
+            self._daily_metrics.append(self._current_day)
         result = self._current_day
         self._current_day = None
         return result
@@ -162,6 +167,7 @@ class PerformanceTracker:
             "current_tier": self._current_tier,
             "peak_equity": self._peak_equity,
             "days": [asdict(d) for d in self._daily_metrics],
+            "current_day": asdict(self._current_day) if self._current_day else None,
         }
         path.write_text(json.dumps(data, indent=2))
 
@@ -177,6 +183,8 @@ class PerformanceTracker:
         tracker._daily_metrics = [
             DailyMetrics(**d) for d in data.get("days", [])
         ]
+        if data.get("current_day"):
+            tracker._current_day = DailyMetrics(**data["current_day"])
         return tracker
 
     def summary(self) -> str:

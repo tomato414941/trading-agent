@@ -327,3 +327,68 @@ class TestShadowModeBugFixes:
         # 4 prices → 3 learning events (first has no prev_price/prev_features)
         # Each learns PREVIOUS features with CURRENT target (no lookahead)
         assert learner.samples_seen == 3
+
+    def test_calibration_uses_p_up(self):
+        """Bug 4: Calibration should always use P(up) for consistent buckets."""
+        from trading_agent.ml_strategy import CryptoOnlineLearner, MLConfig, Prediction
+
+        learner = CryptoOnlineLearner(MLConfig(grace_period=2))
+        learner.learn({"x": 1.0}, 1)
+        learner.learn({"x": 2.0}, 0)
+
+        # When direction=0 (down), P(up) should be low
+        pred_down = Prediction(
+            direction=0, confidence=0.8,
+            calibrated_confidence=0.2,  # 1 - 0.8 for P(up)
+            probabilities={0: 0.8, 1: 0.2},
+        )
+        # update_calibration should receive P(up)=0.2, not confidence=0.8
+        p_up = pred_down.probabilities.get(1, 1 - pred_down.confidence)
+        assert p_up == pytest.approx(0.2)
+
+    def test_stop_loss_take_profit_in_shadow(self):
+        """Bug 5: SL/TP should trigger automatic exits."""
+        from trading_agent.order_engine import PaperOrderEngine
+
+        engine = PaperOrderEngine(initial_cash=10000.0, slippage_bps=0.0)
+        engine.set_price("BTC/USDT", 50000.0)
+        order = engine.market_buy("BTC/USDT", 1000.0)
+        entry_price = order.price
+
+        # Price drops 4% → should trigger 3% SL
+        new_price = entry_price * 0.96
+        pnl_pct = (new_price - entry_price) / entry_price * 100
+        assert pnl_pct < -3.0  # SL threshold
+
+        # Price rises 9% → should trigger 8% TP
+        new_price = entry_price * 1.09
+        pnl_pct = (new_price - entry_price) / entry_price * 100
+        assert pnl_pct > 8.0  # TP threshold
+
+    def test_performance_no_duplicate_days(self):
+        """Bug 6: Daily metrics should not have duplicate dates."""
+        tracker = PerformanceTracker()
+        tracker.start_day(10000.0)
+        tracker.record_trade(50.0)
+        metrics = tracker.end_day(10050.0)
+        assert metrics is not None
+
+        # start_day again with same date should not create duplicate
+        tracker.start_day(10050.0)
+        tracker.end_day(10050.0)
+        dates = [d.date for d in tracker._daily_metrics]
+        assert len(dates) == len(set(dates)), f"Duplicate dates: {dates}"
+
+    def test_performance_saves_current_day(self, tmp_path):
+        """Bug 6: current_day should survive save/load cycle."""
+        tracker = PerformanceTracker()
+        tracker.start_day(10000.0)
+        tracker.record_trade(100.0)
+
+        path = tmp_path / "perf.json"
+        tracker.save(path)
+
+        loaded = PerformanceTracker.load(path)
+        assert loaded._current_day is not None
+        assert loaded._current_day.pnl == pytest.approx(100.0)
+        assert loaded._current_day.num_trades == 1

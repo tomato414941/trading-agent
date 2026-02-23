@@ -96,7 +96,9 @@ class ShadowRunner:
             last_pred = self._prev_predictions.get(symbol)
             if last_pred is not None:
                 self._learner.update_accuracy(last_pred.direction, target)
-                self._learner.update_calibration(last_pred.confidence, target)
+                # Calibrate using P(up) so bucket meaning is consistent
+                p_up = last_pred.probabilities.get(1, 1 - last_pred.confidence)
+                self._learner.update_calibration(p_up, target)
 
         self._prev_prices[symbol] = current_price
         self._prev_features[symbol] = features
@@ -106,6 +108,34 @@ class ShadowRunner:
         self._prev_predictions[symbol] = prediction
 
         action = {"price": current_price, "signal": "hold", "features_count": len(features)}
+
+        # SL/TP check: exit position if stop-loss or take-profit hit
+        position_qty = self._engine.positions.get(symbol, 0)
+        entry_price = self._entry_prices.get(symbol)
+        if position_qty > 0 and entry_price is not None:
+            pnl_pct = (current_price - entry_price) / entry_price * 100
+            if pnl_pct <= -self._risk_config.stop_loss_pct:
+                order = self._engine.market_sell(symbol, position_qty)
+                if order:
+                    pnl = order.qty * (order.price - entry_price)
+                    action["signal"] = f"stop_loss ({pnl_pct:.1f}%)"
+                    action["qty"] = order.qty
+                    action["pnl"] = pnl
+                    self._breaker.record_trade(pnl)
+                    self._performance.record_trade(pnl, 0)
+                    self._entry_prices.pop(symbol, None)
+                return action
+            if pnl_pct >= self._risk_config.take_profit_pct:
+                order = self._engine.market_sell(symbol, position_qty)
+                if order:
+                    pnl = order.qty * (order.price - entry_price)
+                    action["signal"] = f"take_profit ({pnl_pct:.1f}%)"
+                    action["qty"] = order.qty
+                    action["pnl"] = pnl
+                    self._breaker.record_trade(pnl)
+                    self._performance.record_trade(pnl, 0)
+                    self._entry_prices.pop(symbol, None)
+                return action
 
         if prediction is None:
             action["signal"] = f"warmup ({self._learner.samples_seen}/{self._ml_config.grace_period})"
@@ -145,12 +175,11 @@ class ShadowRunner:
                 action["qty"] = order.qty
                 action["kelly"] = kelly
                 self._performance.record_trade(0, prediction.calibrated_confidence)
-        elif prediction.direction == 0 and self._engine.positions.get(symbol, 0) > 0:
-            qty = self._engine.positions[symbol]
-            entry_price = self._entry_prices.get(symbol, current_price)
-            order = self._engine.market_sell(symbol, qty)
+        elif prediction.direction == 0 and position_qty > 0:
+            entry = self._entry_prices.get(symbol, current_price)
+            order = self._engine.market_sell(symbol, position_qty)
             if order:
-                pnl = order.qty * (order.price - entry_price)
+                pnl = order.qty * (order.price - entry)
                 action["signal"] = "sell"
                 action["qty"] = order.qty
                 action["pnl"] = pnl
@@ -176,6 +205,14 @@ class ShadowRunner:
         self._performance.start_day(equity)
 
         while not self._stop:
+            # Handle day rollover
+            equity = self._engine.cash + sum(
+                self._engine.positions.get(s, 0) * self._engine.get_price(s)
+                for s in self._agent_config.symbols
+                if self._engine.get_price(s) > 0
+            )
+            self._performance.start_day(equity)
+
             try:
                 result = self.tick()
                 for a in result["actions"]:

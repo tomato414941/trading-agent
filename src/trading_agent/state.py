@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 
+from trading_agent.circuit_breaker import CircuitBreaker
 from trading_agent.portfolio import Portfolio
 from trading_agent.regime import RegimeState
 
@@ -14,6 +15,7 @@ class SharedState:
     portfolio: Portfolio = field(default_factory=Portfolio.load)
     regimes: dict[str, RegimeState] = field(default_factory=dict)
     last_prices: dict[str, float] = field(default_factory=dict)
+    circuit_breaker: CircuitBreaker = field(default_factory=CircuitBreaker.load)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __enter__(self) -> SharedState:

@@ -63,3 +63,44 @@ class TestCircuitBreaker:
         # Still halted even with good equity
         safe, _ = cb.is_safe_to_trade(20_000.0)
         assert safe is False
+
+
+class TestCircuitBreakerPersistence:
+    def test_save_and_load(self, tmp_path):
+        path = tmp_path / "cb.json"
+        cb = CircuitBreaker(config=CircuitBreakerConfig(daily_loss_limit_pct=3.0))
+        cb.reset_daily(10_000.0)
+        cb.is_safe_to_trade(10_000.0)  # sets peak_equity
+        cb.record_trade(-200.0)
+        cb.record_trade(-50.0)
+        cb.save(path)
+
+        loaded = CircuitBreaker.load(path=path)
+        assert loaded._daily_pnl == -250.0
+        assert loaded._consecutive_losses == 2
+        assert loaded._peak_equity == 10_000.0
+
+    def test_load_missing_file(self, tmp_path):
+        path = tmp_path / "nonexistent.json"
+        cb = CircuitBreaker.load(path=path)
+        assert cb._daily_pnl == 0.0
+        assert cb._peak_equity == 0.0
+
+    def test_halted_survives_reload(self, tmp_path):
+        path = tmp_path / "cb.json"
+        cb = CircuitBreaker(config=CircuitBreakerConfig(max_consecutive_losses=2))
+        cb.record_trade(-10.0)
+        cb.record_trade(-10.0)
+        cb.is_safe_to_trade(10_000.0)  # triggers halt
+        cb.save(path)
+
+        loaded = CircuitBreaker.load(path=path)
+        safe, _ = loaded.is_safe_to_trade(20_000.0)
+        assert safe is False
+        assert loaded.halted is True
+
+    def test_load_corrupted_file(self, tmp_path):
+        path = tmp_path / "cb.json"
+        path.write_text("not json")
+        cb = CircuitBreaker.load(path=path)
+        assert cb._daily_pnl == 0.0  # defaults

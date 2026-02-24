@@ -1,5 +1,7 @@
 """Tests for Phase 2-3 modules: feature engine, ML strategy, circuit breaker, etc."""
 
+import math
+
 import pytest
 
 from trading_agent.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
@@ -392,3 +394,107 @@ class TestShadowModeBugFixes:
         assert loaded._current_day is not None
         assert loaded._current_day.pnl == pytest.approx(100.0)
         assert loaded._current_day.num_trades == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase A: Feature NaN/inf validation
+# ---------------------------------------------------------------------------
+
+class TestFeatureNaNValidation:
+    def test_nan_input_filtered(self):
+        engine = CryptoFeatureEngine()
+        features = engine.compute({"btc_close": float("nan"), "dxy": 104.5})
+        assert "btc_close_raw" not in features
+        assert "dxy_raw" in features
+
+    def test_inf_input_filtered(self):
+        engine = CryptoFeatureEngine()
+        features = engine.compute({"btc_close": float("inf"), "dxy": 104.5})
+        assert "btc_close_raw" not in features
+        assert "dxy_raw" in features
+
+    def test_all_nan_returns_empty(self):
+        engine = CryptoFeatureEngine()
+        features = engine.compute({"a": float("nan"), "b": float("inf")})
+        assert features == {}
+
+    def test_nan_not_stored_in_history(self):
+        engine = CryptoFeatureEngine()
+        engine.compute({"x": 100.0})
+        engine.compute({"x": float("nan")})
+        # NaN should not be appended; only valid value stored
+        assert len(engine._history.get("x", [])) == 1
+
+    def test_output_sanitized(self):
+        engine = CryptoFeatureEngine()
+        features = engine.compute({"x": 100.0})
+        for v in features.values():
+            assert math.isfinite(v)
+
+
+class TestMLNaNValidation:
+    def test_learner_skips_nan_features(self):
+        learner = CryptoOnlineLearner(MLConfig(grace_period=3))
+        learner.learn({"f1": float("nan")}, 1)
+        assert learner.samples_seen == 0
+
+    def test_learner_predict_nan_returns_none(self):
+        learner = CryptoOnlineLearner(MLConfig(grace_period=3))
+        for i in range(5):
+            learner.learn({"f1": float(i)}, i % 2)
+        pred = learner.predict({"f1": float("nan")})
+        assert pred is None
+
+    def test_learner_works_with_valid_features(self):
+        learner = CryptoOnlineLearner(MLConfig(grace_period=3))
+        for i in range(5):
+            learner.learn({"f1": float(i), "f2": float(i * 2)}, i % 2)
+        assert learner.samples_seen == 5
+
+
+# ---------------------------------------------------------------------------
+# Phase A: Graduation statistical significance
+# ---------------------------------------------------------------------------
+
+class TestGraduationStatistics:
+    def test_requires_30_trades(self):
+        tracker = PerformanceTracker()
+        from trading_agent.performance import DailyMetrics
+        for day in range(30):
+            tracker._daily_metrics.append(DailyMetrics(
+                date=f"2025-01-{day + 1:02d}",
+                pnl=10.0, pnl_pct=0.1, num_trades=0, wins=0,
+                win_rate=0.0, max_drawdown_pct=1.0, equity=10100.0,
+            ))
+        # Only 0 trades total
+        can, reason = tracker.should_graduate()
+        assert can is False
+        assert "30" in reason
+
+    def test_significant_win_rate_passes(self):
+        tracker = PerformanceTracker()
+        from trading_agent.performance import DailyMetrics
+        for day in range(30):
+            tracker._daily_metrics.append(DailyMetrics(
+                date=f"2025-01-{day + 1:02d}",
+                pnl=10.0, pnl_pct=0.1, num_trades=3, wins=2,
+                win_rate=66.7, max_drawdown_pct=1.0,
+                equity=10000.0 + day * 10,
+            ))
+        # 90 trades at ~67% win rate -> very significant
+        can, reason = tracker.should_graduate()
+        assert "not significant" not in reason
+
+    def test_insignificant_win_rate_fails(self):
+        tracker = PerformanceTracker()
+        from trading_agent.performance import DailyMetrics
+        for day in range(30):
+            tracker._daily_metrics.append(DailyMetrics(
+                date=f"2025-01-{day + 1:02d}",
+                pnl=1.0, pnl_pct=0.01, num_trades=2, wins=1,
+                win_rate=50.0, max_drawdown_pct=1.0,
+                equity=10000.0 + day,
+            ))
+        # 60 trades at 50% win rate -> NOT significant (p=0.5)
+        can, reason = tracker.should_graduate()
+        assert can is False

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from trading_agent._util import atomic_write_bytes
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +22,7 @@ class MLConfig:
     grace_period: int = 50
     confidence_threshold: float = 0.58
     kelly_fraction: float = 0.15
+    max_kelly_per_symbol: float = 0.10
     signal_noise_url: str = "http://localhost:8000"
 
 
@@ -96,6 +100,9 @@ class CryptoOnlineLearner:
     def predict(self, features: dict[str, float]) -> Prediction | None:
         if not features:
             return None
+        if any(not math.isfinite(v) for v in features.values()):
+            log.warning("Skipping predict: NaN/inf in features")
+            return None
         if self._samples_seen < self._config.grace_period:
             self._last_features = features
             return None
@@ -125,6 +132,9 @@ class CryptoOnlineLearner:
     def learn(self, features: dict[str, float], target: int) -> None:
         if not features:
             return
+        if any(not math.isfinite(v) for v in features.values()):
+            log.warning("Skipping learn: NaN/inf in features")
+            return
         self._model.learn_one(features, target)
         self._samples_seen += 1
 
@@ -146,7 +156,8 @@ class CryptoOnlineLearner:
             return 0.0
         b = take_profit_pct / stop_loss_pct if stop_loss_pct > 0 else 1.0
         kelly = (p * b - (1 - p)) / b
-        return max(0.0, kelly * self._config.kelly_fraction)
+        sized = max(0.0, kelly * self._config.kelly_fraction)
+        return min(sized, self._config.max_kelly_per_symbol)
 
     @property
     def accuracy(self) -> float:
@@ -172,17 +183,16 @@ class CryptoOnlineLearner:
 
     def save(self, path: Path | None = None) -> None:
         path = path or (MODEL_DIR / "crypto_learner.pkl")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
-            pickle.dump({
-                "model": self._model,
-                "samples_seen": self._samples_seen,
-                "correct": self._correct,
-                "total_predictions": self._total_predictions,
-                "config": self._config,
-                "last_features": self._last_features,
-                "calibration": self._calibration,
-            }, f)
+        data = pickle.dumps({
+            "model": self._model,
+            "samples_seen": self._samples_seen,
+            "correct": self._correct,
+            "total_predictions": self._total_predictions,
+            "config": self._config,
+            "last_features": self._last_features,
+            "calibration": self._calibration,
+        })
+        atomic_write_bytes(path, data)
         log.info("Model saved: %d samples, %.1f%% accuracy", self._samples_seen, self.accuracy * 100)
 
     @classmethod

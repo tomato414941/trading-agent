@@ -92,6 +92,14 @@ def tick_symbol(
             raw_signal.upper(), signal.upper(), regime_tag, pos.qty,
         )
 
+        # Circuit breaker check
+        equity = portfolio.total_value(prices)
+        state.circuit_breaker.reset_daily(equity)
+        safe, cb_reason = state.circuit_breaker.is_safe_to_trade(equity)
+        if not safe:
+            log.warning("[SIGNAL] [%s] Blocked by circuit breaker: %s", symbol, cb_reason)
+            return
+
         trade = None
         if signal == "buy":
             if portfolio.can_buy(prices, risk):
@@ -106,6 +114,9 @@ def tick_symbol(
                 "[SIGNAL] [%s] TRADE: %s %.6f @ $%.2f",
                 symbol, trade["side"].upper(), trade["qty"], price,
             )
+            if signal == "sell" and pos.entry_price > 0:
+                pnl = (price - pos.entry_price) * trade.get("qty", 0)
+                state.circuit_breaker.record_trade(pnl)
             portfolio.save()
             log_trade(trade, signal, rsi)
             notify_trade(trade, signal, rsi)

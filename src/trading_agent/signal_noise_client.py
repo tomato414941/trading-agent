@@ -36,11 +36,12 @@ CRYPTO_SIGNALS = [
 class SignalNoiseClient:
     """Fetch crypto-relevant signals from signal-noise service."""
 
-    def __init__(self, base_url: str = DEFAULT_URL, timeout: float = 10.0):
+    def __init__(self, base_url: str = DEFAULT_URL, timeout: float = 10.0, cache_ttl: float = 3600.0):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._session = requests.Session()
-        self._cache: dict[str, float] = {}
+        self._cache: dict[str, tuple[float, float]] = {}  # name -> (value, timestamp)
+        self._cache_ttl = cache_ttl
 
     def health(self) -> bool:
         try:
@@ -69,14 +70,19 @@ class SignalNoiseClient:
                 data = r.json()
                 if data and data.get("value") is not None:
                     values[name] = float(data["value"])
-                    self._cache[name] = values[name]
+                    self._cache[name] = (values[name], time.time())
             except requests.HTTPError:
                 log.debug("Signal %s not available", name)
             except Exception as e:
                 log.debug("Failed to fetch %s: %s", name, e)
-                # Use cached value if available
                 if name in self._cache:
-                    values[name] = self._cache[name]
+                    val, ts = self._cache[name]
+                    age = time.time() - ts
+                    if age < self._cache_ttl:
+                        values[name] = val
+                        log.debug("Using cached %s (age=%.0fs)", name, age)
+                    else:
+                        log.warning("Cache expired for %s (age=%.0fs)", name, age)
 
         return values
 

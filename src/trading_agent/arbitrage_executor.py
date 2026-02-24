@@ -18,6 +18,7 @@ from pathlib import Path
 
 import ccxt
 
+from trading_agent._util import atomic_write_text
 from trading_agent.config import ArbitrageConfig, DEFAULT_ARBITRAGE
 from trading_agent.exchange import create_futures_exchange, create_spot_exchange
 
@@ -52,8 +53,7 @@ class LiveArbitrageState:
     trades: list[dict] = field(default_factory=list)
 
     def save(self, path: Path = STATE_PATH) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2))
+        atomic_write_text(path, json.dumps(asdict(self), indent=2))
 
     @classmethod
     def load(cls, path: Path = STATE_PATH) -> LiveArbitrageState:
@@ -123,8 +123,8 @@ def open_position(
     symbol: str,
     amount_usdt: float,
     config: ArbitrageConfig,
-) -> None:
-    """Open delta-neutral: spot buy + futures short."""
+) -> bool:
+    """Open delta-neutral: spot buy + futures short. Returns True on success."""
     price = get_spot_price(ex_futures, symbol)
     qty = amount_usdt / price
 
@@ -134,7 +134,7 @@ def open_position(
 
     if qty <= 0:
         log.warning("Quantity too small to open position: %s", qty)
-        return
+        return False
 
     # Set leverage to 1x
     try:
@@ -150,7 +150,7 @@ def open_position(
         spot_order = ex_spot.create_market_buy_order(symbol, qty)
     except Exception as e:
         log.error("Spot buy failed, aborting: %s", e)
-        return
+        return False
 
     spot_fill_qty = float(spot_order.get("filled", qty))
 
@@ -166,7 +166,7 @@ def open_position(
             log.info("Rollback: spot sell successful, position unwound")
         except Exception as e2:
             log.critical("ROLLBACK FAILED: %s -- Manual intervention required!", e2)
-        return
+        return False
 
     spot_price = float(spot_order.get("average", price))
     futures_price = float(futures_order.get("average", price))
@@ -192,6 +192,7 @@ def open_position(
         "Position opened: spot=%.2f futures=%.2f fees=%.4f",
         spot_price, futures_price, spot_fee + futures_fee,
     )
+    return True
 
 
 def close_position(
@@ -210,10 +211,27 @@ def close_position(
 
     log.info("Closing position: spot sell %.6f + futures cover %.6f %s", qty, qty, symbol)
 
-    spot_order = ex_spot.create_market_sell_order(symbol, qty)
-    futures_order = ex_futures.create_market_buy_order(
-        _futures_symbol(symbol), qty, params={"reduceOnly": True}
-    )
+    # Leg 1: Spot sell
+    try:
+        spot_order = ex_spot.create_market_sell_order(symbol, qty)
+    except Exception as e:
+        log.error("Spot sell failed, position remains open: %s", e)
+        return
+
+    # Leg 2: Futures cover
+    try:
+        futures_order = ex_futures.create_market_buy_order(
+            _futures_symbol(symbol), qty, params={"reduceOnly": True}
+        )
+    except Exception as e:
+        log.critical(
+            "FUTURES COVER FAILED after spot sell! "
+            "Manual intervention: buy back %.6f %s futures. Error: %s",
+            qty, _futures_symbol(symbol), e,
+        )
+        state.spot_qty = 0.0
+        state.save()
+        return
 
     spot_fee = float(spot_order.get("cost", 0)) * config.spot_fee_rate
     futures_fee = float(futures_order.get("cost", 0)) * config.futures_fee_rate
@@ -263,15 +281,15 @@ def check_and_act(
             log.info("FR settlement: $%.4f (next=%s)", fr_payment,
                      datetime.fromtimestamp(state.next_settlement_ms / 1000, tz=timezone.utc).isoformat())
 
-        # Check exit
-        if fr < config.exit_fr_threshold:
-            state.low_fr_count += 1
-        else:
-            state.low_fr_count = 0
+            # Check exit only at settlement times (not every 5-min tick)
+            if fr < config.exit_fr_threshold:
+                state.low_fr_count += 1
+            else:
+                state.low_fr_count = 0
 
-        if state.low_fr_count >= config.exit_consecutive_periods:
-            close_position(ex_futures, ex_spot, state, config)
-            return "closed"
+            if state.low_fr_count >= config.exit_consecutive_periods:
+                close_position(ex_futures, ex_spot, state, config)
+                return "closed"
 
         state.save()
         return f"holding (last_fr=${state.last_settlement_fr:+.4f}, low_count={state.low_fr_count})"
@@ -286,8 +304,8 @@ def check_and_act(
             log.warning("Insufficient balance: $%.2f", free_usdt)
             return "skip (low balance)"
 
-        open_position(ex_futures, ex_spot, state, symbol, invest, config)
-        return "opened"
+        success = open_position(ex_futures, ex_spot, state, symbol, invest, config)
+        return "opened" if success else "open_failed"
 
     else:
         return f"waiting (FR={fr:.6f} < threshold={config.entry_fr_threshold})"

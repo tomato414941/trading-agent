@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -44,6 +45,14 @@ class CryptoFeatureEngine:
 
     def compute(self, latest_values: dict[str, float]) -> dict[str, float]:
         features: dict[str, float] = {}
+
+        # Filter NaN/inf inputs
+        latest_values = {
+            k: v for k, v in latest_values.items()
+            if isinstance(v, (int, float)) and math.isfinite(v)
+        }
+        if not latest_values:
+            return features
 
         for name, value in latest_values.items():
             if name not in self._history:
@@ -110,6 +119,8 @@ class CryptoFeatureEngine:
             mom_b = (hb[-1] - ma_b) / abs(ma_b) if abs(ma_b) > 1e-10 else 0.0
             features[f"{name}_div"] = mom_a - mom_b
 
+        # Sanitize outputs
+        features = {k: v for k, v in features.items() if math.isfinite(v)}
         return features
 
     def compute_target(self, prev_price: float, curr_price: float) -> int:

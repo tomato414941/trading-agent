@@ -178,16 +178,17 @@ class TestCheckAndAct:
         assert state.next_settlement_ms > past_ms
 
     def test_exit_on_consecutive_low_fr(self, mock_exchanges, config):
-        """N consecutive low FR -> closes position."""
+        """N consecutive low FR at settlement -> closes position."""
         ex_futures, ex_spot = mock_exchanges
         ex_futures.fetch_funding_rate.return_value = {"fundingRate": 0.00005}
-        future_ms = int(time.time() * 1000) + 3600_000
+        # Settlement in the past so the settlement block fires
+        past_ms = int(time.time() * 1000) - 1000
         state = LiveArbitrageState(
             is_open=True, symbol="BTC/USDT",
             spot_qty=0.01, spot_entry_price=50000.0,
             futures_qty=0.01,
-            low_fr_count=2,  # already 2, this tick makes 3
-            next_settlement_ms=future_ms,
+            low_fr_count=2,  # already 2, this settlement makes 3
+            next_settlement_ms=past_ms,
         )
 
         action = check_and_act(ex_futures, ex_spot, state, config)
@@ -197,16 +198,17 @@ class TestCheckAndAct:
         assert state.num_round_trips == 1
 
     def test_low_fr_resets_on_high_fr(self, mock_exchanges, config):
-        """Low FR count resets when FR goes above threshold."""
+        """Low FR count resets at settlement when FR goes above threshold."""
         ex_futures, ex_spot = mock_exchanges
         ex_futures.fetch_funding_rate.return_value = {"fundingRate": 0.0005}
-        future_ms = int(time.time() * 1000) + 3600_000
+        # Settlement in the past so the settlement block fires
+        past_ms = int(time.time() * 1000) - 1000
         state = LiveArbitrageState(
             is_open=True, symbol="BTC/USDT",
             spot_qty=0.01, spot_entry_price=50000.0,
             futures_qty=0.01,
             low_fr_count=2,
-            next_settlement_ms=future_ms,
+            next_settlement_ms=past_ms,
         )
 
         check_and_act(ex_futures, ex_spot, state, config)

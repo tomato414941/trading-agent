@@ -10,6 +10,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
+from scipy.stats import binomtest
+
+from trading_agent._util import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -119,13 +122,21 @@ class PerformanceTracker:
             return False, f"PnL negative: ${total_pnl:.2f}"
 
         total_trades = sum(d.num_trades for d in window)
-        if total_trades < 20:
-            return False, f"Only {total_trades} trades (need 20+)"
+        if total_trades < 30:
+            return False, f"Only {total_trades} trades (need 30+)"
 
         total_wins = sum(d.wins for d in window)
         win_rate = total_wins / total_trades * 100 if total_trades > 0 else 0
         if win_rate < 50:
             return False, f"Win rate {win_rate:.1f}% < 50%"
+
+        # Statistical significance: win rate better than chance
+        btest = binomtest(total_wins, total_trades, 0.5, alternative="greater")
+        if btest.pvalue > 0.05:
+            return False, (
+                f"Win rate {win_rate:.1f}% not significant "
+                f"(p={btest.pvalue:.3f}, need p<0.05)"
+            )
 
         # Rolling Sharpe
         daily_returns = [d.pnl_pct for d in window if d.pnl_pct != 0]
@@ -169,7 +180,7 @@ class PerformanceTracker:
             "days": [asdict(d) for d in self._daily_metrics],
             "current_day": asdict(self._current_day) if self._current_day else None,
         }
-        path.write_text(json.dumps(data, indent=2))
+        atomic_write_text(path, json.dumps(data, indent=2))
 
     @classmethod
     def load(cls, path: Path | None = None) -> PerformanceTracker:

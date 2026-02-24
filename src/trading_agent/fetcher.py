@@ -11,6 +11,17 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# Shared ccxt instance (avoids creating new connection per call)
+_exchange: ccxt.binance | None = None
+
+
+def _get_exchange() -> ccxt.binance:
+    global _exchange
+    if _exchange is None:
+        _exchange = ccxt.binance({"enableRateLimit": True})
+    return _exchange
+
+
 # Binance max per request
 _PAGE_SIZE = 1000
 
@@ -30,7 +41,7 @@ def fetch_ohlcv(
     timeframe: str = "1h",
     limit: int = 100,
 ) -> pd.DataFrame:
-    exchange = ccxt.binance()
+    exchange = _get_exchange()
     raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -43,7 +54,7 @@ def fetch_ohlcv_paginated(
     total: int = 2000,
 ) -> pd.DataFrame:
     """Fetch more candles than the exchange limit by paginating backwards."""
-    exchange = ccxt.binance()
+    exchange = _get_exchange()
     tf_ms = _TF_MS.get(timeframe, 3_600_000)
 
     all_data: list[list] = []
@@ -86,7 +97,7 @@ def fetch_ohlcv_paginated(
 
 def fetch_ticker_price(symbol: str = "BTC/USDT") -> float:
     """Fetch current price via ticker API (faster than OHLCV)."""
-    exchange = ccxt.binance()
+    exchange = _get_exchange()
     ticker = exchange.fetch_ticker(symbol)
     return float(ticker["last"])
 
@@ -109,7 +120,7 @@ def _to_futures_symbol(symbol: str) -> str:
 
 def fetch_funding_rate(symbol: str = "BTC/USDT") -> dict:
     """Fetch current funding rate for a symbol."""
-    exchange = ccxt.binance()
+    exchange = _get_exchange()
     return exchange.fetch_funding_rate(_to_futures_symbol(symbol))
 
 
@@ -118,7 +129,7 @@ def fetch_funding_rate_history(
     total: int = 1000,
 ) -> pd.DataFrame:
     """Fetch funding rate history with pagination (8h intervals)."""
-    exchange = ccxt.binance()
+    exchange = _get_exchange()
     futures_sym = _to_futures_symbol(symbol)
 
     all_data: list[dict] = []

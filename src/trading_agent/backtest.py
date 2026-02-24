@@ -284,10 +284,12 @@ def run_backtest(
     funding_df: pd.DataFrame | None = None,
     slippage_bps: float = 0.0,
     spread_bps: float = 0.0,
+    skip_indicators: bool = False,
 ) -> BacktestResult:
     if df is None:
         df = fetch_ohlcv(symbol, timeframe, limit)
-    df = compute_indicators(df)
+    if not skip_indicators:
+        df = compute_indicators(df)
     if funding_df is not None:
         df = _merge_funding_rates(df, funding_df)
     elif "funding_rate" not in df.columns:
@@ -567,6 +569,7 @@ def parameter_sweep(
             df=df_ind,
             slippage_bps=slippage_bps,
             spread_bps=spread_bps,
+            skip_indicators=True,
         )
         r.strategy_name = f"rsi{rsi_w}_cd{cd}_sl{sl}_tp{tp}_ts{ts}"
         results.append(r)

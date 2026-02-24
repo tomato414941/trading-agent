@@ -35,7 +35,7 @@ class ShadowRunner:
         self._ml_config = ml_config or MLConfig()
 
         self._engine = PaperOrderEngine(initial_cash=initial_cash)
-        self._breaker = CircuitBreaker(CircuitBreakerConfig())
+        self._breaker = CircuitBreaker.load()
         self._learner = CryptoOnlineLearner.load()
         self._feature_engine = CryptoFeatureEngine(FeatureConfig())
         self._signal_client = SignalNoiseClient(self._ml_config.signal_noise_url)
